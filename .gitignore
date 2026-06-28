@@ -1,0 +1,33 @@
+# Local/private runtime data
+data/
+server/
+/dist/
+*.log
+*.pid
+*.tmp
+*.bak
+*.backup
+
+# Secrets and local machine config
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.crt
+*.cer
+*.csr
+id_rsa*
+id_ed25519*
+
+# Local Codex/agent metadata
+.agents/
+.codex/
+
+# Dependencies and build outputs
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+internal/static/dist/*
+!internal/static/dist/placeholder.html
