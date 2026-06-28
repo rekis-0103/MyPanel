@@ -1,0 +1,53 @@
+name: Release panel.exe
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: web
+
+      - name: Test backend
+        run: go test ./...
+
+      - name: Build panel.exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $tag = "${{ github.ref_name }}"
+          $commit = "${{ github.sha }}"
+          $date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          go build -trimpath -ldflags "-s -w -X main.version=$tag -X main.commit=$commit -X main.date=$date" -o dist/panel.exe ./cmd/panel
+          (Get-FileHash dist/panel.exe -Algorithm SHA256).Hash.ToLower() + "  panel.exe" | Set-Content dist/panel.exe.sha256
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/panel.exe
+            dist/panel.exe.sha256
