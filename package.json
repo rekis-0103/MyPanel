@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "install:web": "npm --prefix web install",
+    "build:web": "npm --prefix web run build",
+    "build": "npm --prefix web run build && go build -buildvcs=false -ldflags \"-s -w\" -o dist/MyPanel/panel.exe ./cmd/panel",
+    "dev:web": "npm --prefix web run dev"
+  },
+  "devDependencies": {}
+}
