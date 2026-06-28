@@ -1057,6 +1057,9 @@ func (a *App) safePath(server Server, raw string) (string, string, error) {
 			return "", "", errors.New("symlink escapes server root")
 		}
 	}
+	if target == root {
+		return target, rel, nil
+	}
 	parent := filepath.Dir(target)
 	for {
 		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
@@ -1065,6 +1068,9 @@ func (a *App) safePath(server Server, raw string) (string, string, error) {
 			if err != nil || relResolved == ".." || strings.HasPrefix(relResolved, ".."+string(os.PathSeparator)) {
 				return "", "", errors.New("parent symlink escapes server root")
 			}
+			break
+		}
+		if parent == root {
 			break
 		}
 		next := filepath.Dir(parent)

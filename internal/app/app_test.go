@@ -22,6 +22,14 @@ func TestSafePathRejectsTraversalAndAbsolutePaths(t *testing.T) {
 		}
 	}
 
+	rootTarget, rootRel, err := a.safePath(server, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootRel != "." || rootTarget != filepath.Join(base, "server", "test") {
+		t.Fatalf("unexpected root path: target=%q rel=%q", rootTarget, rootRel)
+	}
+
 	target, rel, err := a.safePath(server, "world/level.dat")
 	if err != nil {
 		t.Fatal(err)
