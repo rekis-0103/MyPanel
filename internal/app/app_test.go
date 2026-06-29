@@ -1,10 +1,15 @@
 package app
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestSafePathRejectsTraversalAndAbsolutePaths(t *testing.T) {
@@ -66,5 +71,35 @@ func TestJSONStoreCreatesAndUpdatesAtomically(t *testing.T) {
 	}
 	if len(value) != 1 || value[0].ID != "srv_1" {
 		t.Fatalf("unexpected stored value: %#v", value)
+	}
+}
+
+func TestConsoleWebSocketUpgradesThroughStatusWriter(t *testing.T) {
+	a := &App{
+		processes: NewProcessManager(nil),
+		updater: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool { return true },
+		},
+	}
+	server := Server{ID: "srv_test"}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ww := &statusWriter{ResponseWriter: w, status: 200}
+		a.handleConsoleWS(ww, r, server)
+	}))
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(msg), "Server is not running") {
+		t.Fatalf("unexpected console message: %q", msg)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -187,9 +188,19 @@ type statusWriter struct {
 	status int
 }
 
+var _ http.Hijacker = (*statusWriter)(nil)
+
 func (w *statusWriter) WriteHeader(code int) {
 	w.status = code
 	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not support hijacking")
+	}
+	return hijacker.Hijack()
 }
 
 type ctxRequestID struct{}
@@ -857,7 +868,8 @@ func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request, server Serve
 		return
 	}
 	dto := map[string]any{
-		"running": a.processes.IsRunning(server.ID),
+		"running":   a.processes.IsRunning(server.ID),
+		"sampledAt": time.Now().UTC(),
 		"disk": map[string]any{
 			"bytes": dirSize(a.absServerRoot(server)),
 		},
@@ -867,6 +879,9 @@ func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request, server Serve
 		if err == nil {
 			mem, _ := p.MemoryInfo()
 			cpu, _ := p.CPUPercent()
+			name, _ := p.Name()
+			exe, _ := p.Exe()
+			createTime, _ := p.CreateTime()
 			ioCounters, _ := p.IOCounters()
 			children, _ := p.Children()
 			childPids := make([]int32, 0, len(children))
@@ -874,11 +889,14 @@ func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request, server Serve
 				childPids = append(childPids, child.Pid)
 			}
 			dto["process"] = map[string]any{
-				"pid":      rt.PID(),
-				"cpu":      cpu,
-				"rss":      memoryRSS(mem),
-				"io":       ioCounters,
-				"children": childPids,
+				"pid":        rt.PID(),
+				"name":       name,
+				"exe":        exe,
+				"createTime": createTime,
+				"cpu":        cpu,
+				"rss":        memoryRSS(mem),
+				"io":         ioCounters,
+				"children":   childPids,
 			}
 		}
 	}
@@ -954,6 +972,7 @@ func (a *App) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if ctype := mime.TypeByExtension(filepath.Ext(path)); ctype != "" {
 		w.Header().Set("Content-Type", ctype)
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	http.ServeContent(w, r, path, time.Now(), bytes.NewReader(data))
 }
 
@@ -1127,6 +1146,7 @@ func (pm *ProcessManager) Start(server Server) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	rt.Append(fmt.Sprintf("[mypanel] server process started pid=%d\r\n", cmd.Process.Pid))
 	pm.runtimes[server.ID] = rt
 	go rt.pipe(stdout)
 	go rt.pipe(stderr)
