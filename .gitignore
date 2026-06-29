@@ -24,6 +24,8 @@ id_ed25519*
 # Local Codex/agent metadata
 .agents/
 .codex/
+.playwright-mcp/
+mypanel-*.png
 
 # Dependencies and build outputs
 web/node_modules/
