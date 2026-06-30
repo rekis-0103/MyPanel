@@ -76,11 +76,16 @@ type App struct {
 	config     *JSONStore[Config]
 	users      *JSONStore[[]User]
 	servers    *JSONStore[[]Server]
+	console    *ConsoleHub
 	processes  *ProcessManager
+	metrics    *MetricSampler
 	updater    websocket.Upgrader
 	http       *http.ServeMux
 	client     *http.Client
 }
+
+const consoleMaxBytes = 5 * 1024 * 1024
+const defaultGitHubRepo = "rekis-0103/MyPanel"
 
 func Run(build BuildInfo) error {
 	exe, err := os.Executable()
@@ -144,6 +149,8 @@ func (a *App) init() error {
 	if _, err := a.servers.Get(); err != nil {
 		return err
 	}
+	a.console = NewConsoleHub(consoleMaxBytes)
+	a.metrics = NewMetricSampler()
 	a.processes = NewProcessManager(a)
 	return nil
 }
@@ -154,6 +161,20 @@ func (a *App) mustConfig() Config {
 		panic(err)
 	}
 	return cfg
+}
+
+func (a *App) consoleHub() *ConsoleHub {
+	if a.console == nil {
+		a.console = NewConsoleHub(consoleMaxBytes)
+	}
+	return a.console
+}
+
+func (a *App) metricSampler() *MetricSampler {
+	if a.metrics == nil {
+		a.metrics = NewMetricSampler()
+	}
+	return a.metrics
 }
 
 func (a *App) routes() http.Handler {
@@ -659,14 +680,10 @@ func (a *App) handleConsoleWS(w http.ResponseWriter, r *http.Request, server Ser
 		return
 	}
 	defer conn.Close()
-	rt, ok := a.processes.Get(server.ID)
-	if !ok {
-		_ = conn.WriteMessage(websocket.TextMessage, []byte("\r\nServer is not running.\r\n"))
-		return
-	}
-	ch := rt.Subscribe()
-	defer rt.Unsubscribe(ch)
-	for _, line := range rt.Buffer() {
+	hub := a.consoleHub()
+	snapshot, ch := hub.SubscribeWithSnapshot(server.ID)
+	defer hub.Unsubscribe(server.ID, ch)
+	for _, line := range snapshot {
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(line))
 	}
 	done := make(chan struct{})
@@ -684,7 +701,9 @@ func (a *App) handleConsoleWS(w http.ResponseWriter, r *http.Request, server Ser
 			return
 		}
 		if len(msg) > 0 {
-			_ = rt.Write(msg)
+			if rt, ok := a.processes.Get(server.ID); ok {
+				_ = rt.Write(msg)
+			}
 		}
 		select {
 		case <-done:
@@ -877,26 +896,23 @@ func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request, server Serve
 	if rt, ok := a.processes.Get(server.ID); ok && rt.PID() > 0 {
 		p, err := process.NewProcess(int32(rt.PID()))
 		if err == nil {
-			mem, _ := p.MemoryInfo()
-			cpu, _ := p.CPUPercent()
+			createTime, _ := p.CreateTime()
+			usage := collectProcessTreeUsage(p)
+			cpuValue := a.metricSampler().SampleValue(server.ID, p.Pid, createTime, time.Now(), usage.cpuSeconds)
 			name, _ := p.Name()
 			exe, _ := p.Exe()
-			createTime, _ := p.CreateTime()
 			ioCounters, _ := p.IOCounters()
-			children, _ := p.Children()
-			childPids := make([]int32, 0, len(children))
-			for _, child := range children {
-				childPids = append(childPids, child.Pid)
-			}
 			dto["process"] = map[string]any{
 				"pid":        rt.PID(),
 				"name":       name,
 				"exe":        exe,
 				"createTime": createTime,
-				"cpu":        cpu,
-				"rss":        memoryRSS(mem),
+				"cpu":        cpuValue,
+				"cpuMode":    "raw_multicore_tree",
+				"rss":        usage.rss,
+				"memoryMode": "rss_tree",
 				"io":         ioCounters,
-				"children":   childPids,
+				"children":   usage.children,
 			}
 		}
 	}
@@ -928,6 +944,15 @@ func (a *App) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	rel, err := a.latestRelease()
 	if err != nil {
 		writeErr(w, r, http.StatusBadGateway, "update_check_failed", err.Error())
+		return
+	}
+	if available, _ := rel["available"].(bool); !available {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"updating": false,
+			"current":  rel["current"],
+			"latest":   rel["latest"],
+			"message":  "MyPanel is already up to date",
+		})
 		return
 	}
 	assetURL, _ := rel["assetUrl"].(string)
@@ -1101,6 +1126,109 @@ func (a *App) safePath(server Server, raw string) (string, string, error) {
 	return target, rel, nil
 }
 
+type ConsoleHub struct {
+	mu      sync.Mutex
+	maxByte int
+	logs    map[string]*ConsoleLog
+}
+
+type ConsoleLog struct {
+	messages []string
+	bytes    int
+	subs     map[chan string]struct{}
+}
+
+func NewConsoleHub(maxByte int) *ConsoleHub {
+	return &ConsoleHub{maxByte: maxByte, logs: map[string]*ConsoleLog{}}
+}
+
+func (hub *ConsoleHub) Append(serverID, msg string) {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	log := hub.logLocked(serverID)
+	if hub.maxByte > 0 && len(msg) > hub.maxByte {
+		msg = msg[len(msg)-hub.maxByte:]
+	}
+	log.messages = append(log.messages, msg)
+	log.bytes += len(msg)
+	for hub.maxByte > 0 && log.bytes > hub.maxByte && len(log.messages) > 0 {
+		removed := log.messages[0]
+		log.messages = log.messages[1:]
+		log.bytes -= len(removed)
+	}
+	for ch := range log.subs {
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
+}
+
+func (hub *ConsoleHub) Snapshot(serverID string) []string {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	log := hub.logLocked(serverID)
+	return append([]string{}, log.messages...)
+}
+
+func (hub *ConsoleHub) Subscribe(serverID string) chan string {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	ch := make(chan string, 64)
+	hub.logLocked(serverID).subs[ch] = struct{}{}
+	return ch
+}
+
+func (hub *ConsoleHub) SubscribeWithSnapshot(serverID string) ([]string, chan string) {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	log := hub.logLocked(serverID)
+	ch := make(chan string, 64)
+	log.subs[ch] = struct{}{}
+	return append([]string{}, log.messages...), ch
+}
+
+func (hub *ConsoleHub) Unsubscribe(serverID string, ch chan string) {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	log := hub.logLocked(serverID)
+	if _, ok := log.subs[ch]; ok {
+		delete(log.subs, ch)
+		close(ch)
+	}
+}
+
+func (hub *ConsoleHub) logLocked(serverID string) *ConsoleLog {
+	log, ok := hub.logs[serverID]
+	if !ok {
+		log = &ConsoleLog{subs: map[chan string]struct{}{}}
+		hub.logs[serverID] = log
+	}
+	return log
+}
+
+func serverCommandArgs(server Server) []string {
+	args := append([]string{}, server.JVMArgs...)
+	args = append(args, "-jar", server.Jar)
+	return append(args, server.MCArgs...)
+}
+
+func commandDisplay(binary string, args []string) string {
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, quoteCommandPart(binary))
+	for _, arg := range args {
+		parts = append(parts, quoteCommandPart(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func quoteCommandPart(part string) string {
+	if part == "" || strings.ContainsAny(part, " \t\r\n\"") {
+		return strconv.Quote(part)
+	}
+	return part
+}
+
 type ProcessManager struct {
 	app      *App
 	mu       sync.Mutex
@@ -1117,42 +1245,53 @@ func (pm *ProcessManager) Start(server Server) error {
 	if _, ok := pm.runtimes[server.ID]; ok {
 		return errors.New("server is already running")
 	}
+	hub := pm.app.consoleHub()
+	args := serverCommandArgs(server)
+	hub.Append(server.ID, fmt.Sprintf("\r\n[mypanel] starting: %s\r\n", commandDisplay(server.JavaPath, args)))
 	root := pm.app.absServerRoot(server)
 	jar, _, err := pm.app.safePath(server, server.Jar)
 	if err != nil {
+		hub.Append(server.ID, fmt.Sprintf("[mypanel] start failed: %v\r\n", err))
 		return err
 	}
 	if _, err := os.Stat(jar); err != nil {
-		return fmt.Errorf("jar not found: %s", server.Jar)
+		err = fmt.Errorf("jar not found: %s", server.Jar)
+		hub.Append(server.ID, fmt.Sprintf("[mypanel] start failed: %v\r\n", err))
+		return err
 	}
-	args := append([]string{}, server.JVMArgs...)
-	args = append(args, "-jar", server.Jar)
-	args = append(args, server.MCArgs...)
 	cmd := exec.Command(server.JavaPath, args...)
 	cmd.Dir = root
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		hub.Append(server.ID, fmt.Sprintf("[mypanel] start failed: %v\r\n", err))
 		return err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		hub.Append(server.ID, fmt.Sprintf("[mypanel] start failed: %v\r\n", err))
 		return err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		hub.Append(server.ID, fmt.Sprintf("[mypanel] start failed: %v\r\n", err))
 		return err
 	}
 	rt := NewRuntime(cmd, stdin)
 	if err := cmd.Start(); err != nil {
+		hub.Append(server.ID, fmt.Sprintf("[mypanel] start failed: %v\r\n", err))
 		return err
 	}
-	rt.Append(fmt.Sprintf("[mypanel] server process started pid=%d\r\n", cmd.Process.Pid))
+	hub.Append(server.ID, fmt.Sprintf("[mypanel] server process started pid=%d\r\n", cmd.Process.Pid))
 	pm.runtimes[server.ID] = rt
-	go rt.pipe(stdout)
-	go rt.pipe(stderr)
+	go rt.pipe(stdout, func(msg string) { hub.Append(server.ID, msg) })
+	go rt.pipe(stderr, func(msg string) { hub.Append(server.ID, msg) })
 	go func() {
 		err := cmd.Wait()
-		rt.Append(fmt.Sprintf("\r\n[process exited: %v]\r\n", err))
+		if err != nil {
+			hub.Append(server.ID, fmt.Sprintf("\r\n[mypanel] process exited: %v\r\n", err))
+		} else {
+			hub.Append(server.ID, "\r\n[mypanel] process exited: code=0\r\n")
+		}
 		pm.mu.Lock()
 		delete(pm.runtimes, server.ID)
 		pm.mu.Unlock()
@@ -1163,10 +1302,15 @@ func (pm *ProcessManager) Start(server Server) error {
 
 func (pm *ProcessManager) Stop(serverID string, timeout time.Duration) error {
 	rt, ok := pm.Get(serverID)
+	hub := pm.app.consoleHub()
 	if !ok {
+		hub.Append(serverID, "[mypanel] stop requested but server is not running\r\n")
 		return nil
 	}
-	_ = rt.Write([]byte("stop\n"))
+	hub.Append(serverID, "[mypanel] stopping: sending \"stop\"\r\n")
+	if err := rt.Write([]byte("stop\n")); err != nil {
+		hub.Append(serverID, fmt.Sprintf("[mypanel] stop write failed: %v\r\n", err))
+	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if !pm.IsRunning(serverID) {
@@ -1174,7 +1318,12 @@ func (pm *ProcessManager) Stop(serverID string, timeout time.Duration) error {
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	return rt.Kill()
+	hub.Append(serverID, "[mypanel] stop timeout; killing process\r\n")
+	if err := rt.Kill(); err != nil {
+		hub.Append(serverID, fmt.Sprintf("[mypanel] kill failed: %v\r\n", err))
+		return err
+	}
+	return nil
 }
 
 func (pm *ProcessManager) Get(serverID string) (*Runtime, bool) {
@@ -1204,17 +1353,14 @@ func (pm *ProcessManager) PID(serverID string) int {
 }
 
 type Runtime struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	mu      sync.Mutex
-	subs    map[chan string]struct{}
-	buffer  []string
-	closed  bool
-	maxBuff int
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	mu     sync.Mutex
+	closed bool
 }
 
 func NewRuntime(cmd *exec.Cmd, stdin io.WriteCloser) *Runtime {
-	return &Runtime{cmd: cmd, stdin: stdin, subs: map[chan string]struct{}{}, maxBuff: 400}
+	return &Runtime{cmd: cmd, stdin: stdin}
 }
 
 func (rt *Runtime) PID() int {
@@ -1242,48 +1388,12 @@ func (rt *Runtime) Kill() error {
 	return rt.cmd.Process.Kill()
 }
 
-func (rt *Runtime) pipe(reader io.Reader) {
+func (rt *Runtime) pipe(reader io.Reader, appendMsg func(string)) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		rt.Append(scanner.Text() + "\r\n")
+		appendMsg(scanner.Text() + "\r\n")
 	}
-}
-
-func (rt *Runtime) Append(msg string) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.buffer = append(rt.buffer, msg)
-	if len(rt.buffer) > rt.maxBuff {
-		rt.buffer = rt.buffer[len(rt.buffer)-rt.maxBuff:]
-	}
-	for ch := range rt.subs {
-		select {
-		case ch <- msg:
-		default:
-		}
-	}
-}
-
-func (rt *Runtime) Buffer() []string {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	return append([]string{}, rt.buffer...)
-}
-
-func (rt *Runtime) Subscribe() chan string {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	ch := make(chan string, 64)
-	rt.subs[ch] = struct{}{}
-	return ch
-}
-
-func (rt *Runtime) Unsubscribe(ch chan string) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	delete(rt.subs, ch)
-	close(ch)
 }
 
 func (rt *Runtime) Close() {
@@ -1293,10 +1403,6 @@ func (rt *Runtime) Close() {
 		return
 	}
 	rt.closed = true
-	for ch := range rt.subs {
-		close(ch)
-		delete(rt.subs, ch)
-	}
 	_ = rt.stdin.Close()
 }
 
@@ -1373,11 +1479,8 @@ func (s *JSONStore[T]) writeLocked(value T) error {
 }
 
 func (a *App) latestRelease() (map[string]any, error) {
-	cfg := a.mustConfig()
-	if cfg.GitHubRepo == "" {
-		return map[string]any{"configured": false, "current": a.build.Version}, nil
-	}
-	url := "https://api.github.com/repos/" + cfg.GitHubRepo + "/releases/latest"
+	repo := defaultGitHubRepo
+	url := "https://api.github.com/repos/" + repo + "/releases/latest"
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "MyPanel/"+a.build.Version)
@@ -1409,12 +1512,17 @@ func (a *App) latestRelease() (map[string]any, error) {
 	}
 	return map[string]any{
 		"configured": true,
+		"repo":       repo,
 		"current":    a.build.Version,
 		"latest":     payload.TagName,
 		"releaseUrl": payload.HTMLURL,
 		"assetUrl":   assetURL,
-		"available":  payload.TagName != "" && payload.TagName != a.build.Version,
+		"available":  payload.TagName != "" && !sameVersion(payload.TagName, a.build.Version),
 	}, nil
+}
+
+func sameVersion(a, b string) bool {
+	return strings.TrimPrefix(strings.TrimSpace(a), "v") == strings.TrimPrefix(strings.TrimSpace(b), "v")
 }
 
 func (a *App) download(url, target string) error {
@@ -1535,6 +1643,87 @@ func memoryRSS(info *process.MemoryInfoStat) uint64 {
 		return 0
 	}
 	return info.RSS
+}
+
+type processTreeUsage struct {
+	rss        uint64
+	cpuSeconds float64
+	children   []int32
+}
+
+func collectProcessTreeUsage(root *process.Process) processTreeUsage {
+	var usage processTreeUsage
+	seen := map[int32]struct{}{}
+	var walk func(proc *process.Process, rootPID int32)
+	walk = func(proc *process.Process, rootPID int32) {
+		if proc == nil {
+			return
+		}
+		if _, ok := seen[proc.Pid]; ok {
+			return
+		}
+		seen[proc.Pid] = struct{}{}
+		if proc.Pid != rootPID {
+			usage.children = append(usage.children, proc.Pid)
+		}
+		if mem, err := proc.MemoryInfo(); err == nil {
+			usage.rss += memoryRSS(mem)
+		}
+		if times, err := proc.Times(); err == nil {
+			usage.cpuSeconds += times.User + times.System
+		}
+		children, err := proc.Children()
+		if err != nil {
+			return
+		}
+		for _, child := range children {
+			walk(child, rootPID)
+		}
+	}
+	walk(root, root.Pid)
+	sort.Slice(usage.children, func(i, j int) bool { return usage.children[i] < usage.children[j] })
+	return usage
+}
+
+type MetricSampler struct {
+	mu      sync.Mutex
+	samples map[string]metricSample
+}
+
+type metricSample struct {
+	pid        int32
+	createTime int64
+	wall       time.Time
+	cpuSeconds float64
+}
+
+func NewMetricSampler() *MetricSampler {
+	return &MetricSampler{samples: map[string]metricSample{}}
+}
+
+func (sampler *MetricSampler) Sample(serverID string, proc *process.Process, createTime int64, now time.Time) (float64, error) {
+	times, err := proc.Times()
+	if err != nil {
+		return 0, err
+	}
+	return sampler.SampleValue(serverID, proc.Pid, createTime, now, times.User+times.System), nil
+}
+
+func (sampler *MetricSampler) SampleValue(serverID string, pid int32, createTime int64, now time.Time, cpuSeconds float64) float64 {
+	sampler.mu.Lock()
+	defer sampler.mu.Unlock()
+	next := metricSample{pid: pid, createTime: createTime, wall: now, cpuSeconds: cpuSeconds}
+	prev, ok := sampler.samples[serverID]
+	sampler.samples[serverID] = next
+	if !ok || prev.pid != pid || prev.createTime != createTime {
+		return 0
+	}
+	wallSeconds := now.Sub(prev.wall).Seconds()
+	cpuDelta := cpuSeconds - prev.cpuSeconds
+	if wallSeconds <= 0 || cpuDelta < 0 {
+		return 0
+	}
+	return (cpuDelta / wallSeconds) * 100
 }
 
 func fileSHA256(path string) (string, error) {

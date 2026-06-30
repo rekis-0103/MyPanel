@@ -278,7 +278,8 @@ small {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  flex: 1;
+  flex: 0 1 auto;
+  max-height: min(34vh, 320px);
   min-height: 0;
   overflow: auto;
   padding-right: 2px;
@@ -350,11 +351,102 @@ small {
   box-shadow: 0 0 0 4px var(--green-soft);
 }
 
+.sidebar-tabs {
+  display: grid;
+  gap: 7px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.sidebar-tabs button {
+  width: 100%;
+  justify-content: flex-start;
+  background: transparent;
+  box-shadow: none;
+}
+
+.sidebar-tabs button.active {
+  border-color: rgba(37, 99, 235, .48);
+  background: var(--blue-soft);
+  color: var(--blue-strong);
+  box-shadow: inset 4px 0 0 var(--blue);
+}
+
+.update-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.update-card-head {
+  display: grid;
+  gap: 2px;
+}
+
+.update-card-head strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+
+.update-state {
+  padding: 8px 9px;
+  border-radius: 8px;
+  background: var(--surface-strong);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.update-state.available {
+  background: var(--blue-soft);
+  color: var(--blue-strong);
+  font-weight: 800;
+}
+
+.update-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.update-actions button,
+.update-link {
+  justify-content: flex-start;
+}
+
+.update-link {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  text-decoration: none;
+}
+
+.update-message {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .identity {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
   align-items: center;
   gap: 8px;
+  margin-top: auto;
   padding-top: 14px;
   border-top: 1px solid var(--line);
 }
@@ -615,6 +707,31 @@ small {
   background: #050b14;
   padding: 12px;
   overflow: hidden;
+}
+
+.console-command {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid #1d2d44;
+  background: #0d1a2b;
+}
+
+.console-command input {
+  border-color: #243b5c;
+  background: #07101d;
+  color: #e8f0fb;
+}
+
+.console-command input:disabled {
+  color: #7f8ea3;
+  cursor: not-allowed;
+  opacity: .78;
+}
+
+.console-command button {
+  min-width: 104px;
 }
 
 .create-strip {
@@ -942,19 +1059,34 @@ textarea::placeholder {
   height: 150px;
 }
 
-.chart-svg path {
+.chart-grid-line {
   fill: none;
   stroke: var(--line);
   stroke-width: 1;
 }
 
-.chart-svg polyline {
+.chart-area {
+  fill: rgba(37, 99, 235, .16);
+  stroke: none;
+}
+
+:root[data-theme="dark"] .chart-area {
+  fill: rgba(59, 130, 246, .22);
+}
+
+.chart-line {
   fill: none;
   stroke: var(--blue);
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 3;
   filter: drop-shadow(0 0 8px rgba(37, 99, 235, .25));
+}
+
+.chart-point {
+  fill: var(--surface);
+  stroke: var(--blue);
+  stroke-width: 3;
 }
 
 .chart-empty {
@@ -1224,5 +1356,9 @@ textarea::placeholder {
 
   .auth-panel {
     padding: 18px;
+  }
+
+  .console-command {
+    grid-template-columns: 1fr;
   }
 }

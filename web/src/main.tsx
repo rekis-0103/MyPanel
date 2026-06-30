@@ -6,6 +6,7 @@ import "@xterm/xterm/css/xterm.css";
 import {
   Activity,
   Download,
+  ExternalLink,
   FileText,
   Folder,
   HardDrive,
@@ -15,6 +16,7 @@ import {
   Power,
   RefreshCcw,
   Save,
+  Send,
   Server as ServerIcon,
   Shield,
   Square,
@@ -58,7 +60,17 @@ type Metrics = {
   running: boolean;
   sampledAt: string;
   disk: { bytes: number };
-  process?: { pid: number; name: string; exe: string; createTime: number; cpu: number; rss: number; children: number[] };
+  process?: {
+    pid: number;
+    name: string;
+    exe: string;
+    createTime: number;
+    cpu: number;
+    cpuMode?: string;
+    rss: number;
+    memoryMode?: string;
+    children: number[];
+  };
 };
 
 type MetricSample = {
@@ -126,8 +138,11 @@ const copy = {
     ramRss: "RAM RSS",
     folderSize: "Folder size",
     selfUpdate: "Self-update",
-    githubRepo: "GitHub repository",
-    saveRepo: "Save repo",
+    openReleases: "Open releases",
+    checkUpdate: "Check update",
+    updateAvailable: "Update available",
+    noUpdateAvailable: "Panel is already up to date.",
+    updateConfirm: "A new MyPanel release is available. Download and install it now?",
     applyUpdate: "Download and install update",
     logout: "Logout",
     liveConsole: "Live console",
@@ -152,8 +167,12 @@ const copy = {
     waitingForSamples: "Start the server to collect JVM samples.",
     consoleConnecting: "Connecting",
     consoleConnected: "Connected",
+    consoleHistory: "History",
+    consoleLive: "Live",
     consoleDisconnected: "Disconnected",
-    consoleStopped: "Server is not running. Press Start to open a live console."
+    consoleStopped: "Server is not running. Press Start to open a live console.",
+    consoleCommandPlaceholder: "Type a server command or message",
+    sendCommand: "Send"
   },
   id: {
     appSubtitle: "Konsol operasi server",
@@ -201,8 +220,11 @@ const copy = {
     ramRss: "RAM RSS",
     folderSize: "Ukuran folder",
     selfUpdate: "Self-update",
-    githubRepo: "Repository GitHub",
-    saveRepo: "Simpan repo",
+    openReleases: "Buka releases",
+    checkUpdate: "Cek update",
+    updateAvailable: "Update tersedia",
+    noUpdateAvailable: "Versi panel sudah terbaru.",
+    updateConfirm: "Release MyPanel baru tersedia. Unduh dan pasang sekarang?",
     applyUpdate: "Unduh dan pasang update",
     logout: "Logout",
     liveConsole: "Konsol live",
@@ -227,8 +249,12 @@ const copy = {
     waitingForSamples: "Jalankan server untuk mengumpulkan sampel JVM.",
     consoleConnecting: "Menghubungkan",
     consoleConnected: "Terhubung",
+    consoleHistory: "Riwayat",
+    consoleLive: "Live",
     consoleDisconnected: "Terputus",
-    consoleStopped: "Server belum berjalan. Tekan Start untuk membuka konsol live."
+    consoleStopped: "Server belum berjalan. Tekan Start untuk membuka konsol live.",
+    consoleCommandPlaceholder: "Ketik command atau pesan server",
+    sendCommand: "Kirim"
   }
 };
 
@@ -237,7 +263,7 @@ function App() {
   const [user, setUser] = useState<User | null>(null);
   const [servers, setServers] = useState<Server[]>([]);
   const [selectedId, setSelectedId] = useState("");
-  const [view, setView] = useState<"console" | "files" | "metrics" | "update">("console");
+  const [view, setView] = useState<"console" | "files" | "metrics">("console");
   const [error, setError] = useState("");
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("mypanel.lang") as Lang) || "en");
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
@@ -332,6 +358,8 @@ function App() {
           <Plus size={16} /> {t.registerServer}
         </button>
 
+        {user.role === "admin" && <UpdateWidget api={api} t={t} />}
+
         <div className="sidebar-stat">
           <span>{t.managedInstances}</span>
           <strong>{servers.length}</strong>
@@ -356,6 +384,20 @@ function App() {
           ))}
           {servers.length === 0 && <p className="empty">{t.noServers}</p>}
         </div>
+
+        {selected && (
+          <nav className="sidebar-tabs" aria-label={t.currentSession}>
+            <button className={view === "console" ? "active" : ""} onClick={() => setView("console")}>
+              <TerminalSquare size={16} /> {t.console}
+            </button>
+            <button className={view === "files" ? "active" : ""} onClick={() => setView("files")}>
+              <Folder size={16} /> {t.files}
+            </button>
+            <button className={view === "metrics" ? "active" : ""} onClick={() => setView("metrics")}>
+              <Activity size={16} /> {t.metrics}
+            </button>
+          </nav>
+        )}
 
         <div className="identity">
           <Shield size={16} />
@@ -403,29 +445,12 @@ function App() {
                   <span className="section-kicker">{t.currentSession}</span>
                   <strong>{selected.name}</strong>
                 </div>
-                <nav className="tabs">
-                  <button className={view === "console" ? "active" : ""} onClick={() => setView("console")}>
-                    <TerminalSquare size={16} /> {t.console}
-                  </button>
-                  <button className={view === "files" ? "active" : ""} onClick={() => setView("files")}>
-                    <Folder size={16} /> {t.files}
-                  </button>
-                  <button className={view === "metrics" ? "active" : ""} onClick={() => setView("metrics")}>
-                    <Activity size={16} /> {t.metrics}
-                  </button>
-                  {user.role === "admin" && (
-                    <button className={view === "update" ? "active" : ""} onClick={() => setView("update")}>
-                      <Download size={16} /> {t.update}
-                    </button>
-                  )}
-                </nav>
               </div>
 
               <div className="command-panel-body">
                 {view === "console" && <Console server={selected} token={token} t={t} />}
                 {view === "files" && <Files server={selected} api={api} token={token} t={t} />}
                 {view === "metrics" && <MetricsView server={selected} api={api} t={t} />}
-                {view === "update" && <UpdateView api={api} t={t} />}
               </div>
             </section>
 
@@ -667,50 +692,80 @@ function Console({ server, token, t }: { server: Server; token: string; t: Copy 
   const host = window.location.host;
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const terminalRef = useRef<HTMLDivElement | null>(null);
-  const [status, setStatus] = useState(server.running ? t.consoleConnecting : t.stopped);
+  const socketRef = useRef<WebSocket | null>(null);
+  const [status, setStatus] = useState(server.running ? t.consoleConnecting : t.consoleHistory);
+  const [connected, setConnected] = useState(false);
+  const [command, setCommand] = useState("");
 
   useEffect(() => {
     const node = terminalRef.current;
     if (!node) return;
-    const terminal = new Terminal({ cursorBlink: true, fontFamily: "JetBrains Mono, Consolas, monospace", fontSize: 13 });
+    setConnected(false);
+    const terminal = new Terminal({
+      cursorBlink: false,
+      disableStdin: true,
+      fontFamily: "JetBrains Mono, Consolas, monospace",
+      fontSize: 13
+    });
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(node);
     fit.fit();
-    if (!server.running) {
-      setStatus(t.stopped);
-      terminal.writeln(t.consoleStopped);
-      return () => terminal.dispose();
-    }
     setStatus(t.consoleConnecting);
     const ws = new WebSocket(`${protocol}://${host}/api/v1/servers/${server.id}/console/ws?token=${encodeURIComponent(token)}`);
+    socketRef.current = ws;
     ws.onmessage = (event) => terminal.write(event.data);
     ws.onopen = () => {
-      setStatus(t.consoleConnected);
-      terminal.writeln(`\r\nConnected to ${server.name}`);
+      setConnected(true);
+      setStatus(server.running ? t.consoleLive : t.consoleHistory);
     };
     ws.onerror = () => {
       setStatus(t.consoleDisconnected);
       terminal.writeln("\r\nConsole connection error.\r\n");
     };
-    ws.onclose = () => setStatus(t.consoleDisconnected);
-    const input = terminal.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(data);
-    });
+    ws.onclose = () => {
+      setConnected(false);
+      if (socketRef.current === ws) socketRef.current = null;
+      setStatus(t.consoleDisconnected);
+    };
     const resize = () => fit.fit();
     window.addEventListener("resize", resize);
     return () => {
       window.removeEventListener("resize", resize);
-      input.dispose();
+      setConnected(false);
+      if (socketRef.current === ws) socketRef.current = null;
       ws.close();
       terminal.dispose();
     };
   }, [host, protocol, server.id, server.name, server.running, t, token]);
 
+  function sendCommand(event: React.FormEvent) {
+    event.preventDefault();
+    const text = command.trim();
+    const ws = socketRef.current;
+    if (!text || !server.running || !connected || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(`${text}\n`);
+    setCommand("");
+  }
+
+  const commandDisabled = !server.running || !connected;
+
   return (
     <section className="console-panel">
       <PanelHeader title={t.liveConsole} subtitle={`${server.name} - ${t.websocketSession}`} status={status} />
       <div className="terminal-frame" ref={terminalRef} />
+      <form className="console-command" onSubmit={sendCommand}>
+        <input
+          value={command}
+          onChange={(event) => setCommand(event.target.value)}
+          placeholder={server.running ? t.consoleCommandPlaceholder : t.consoleStopped}
+          disabled={commandDisabled}
+          autoComplete="off"
+        />
+        <button className="primary" type="submit" disabled={commandDisabled || !command.trim()}>
+          <Send size={15} /> {t.sendCommand}
+        </button>
+      </form>
     </section>
   );
 }
@@ -864,6 +919,7 @@ function MetricsView({ server, api, t }: { server: Server; api: ApiFn; t: Copy }
   }, [server.id]);
 
   const rssMax = Math.max(512 * 1024 * 1024, ...samples.map((sample) => sample.rss));
+  const cpuMax = Math.max(100, ...samples.map((sample) => sample.cpu), metrics?.process?.cpu || 0);
   const processLabel = metrics?.process
     ? `${metrics.process.name || t.jvmProcess} - PID ${metrics.process.pid}`
     : t.waitingForSamples;
@@ -885,7 +941,7 @@ function MetricsView({ server, api, t }: { server: Server; api: ApiFn; t: Copy }
           <em>{t.samplingEverySecond}</em>
         </div>
         <div className="chart-grid">
-          <MetricChart title="CPU" subtitle={t.last60Seconds} samples={samples} valueKey="cpu" max={100} formatter={(value) => `${value.toFixed(1)}%`} />
+          <MetricChart title="CPU" subtitle={metrics?.process?.cpuMode === "raw_multicore_tree" ? "Raw tree" : t.last60Seconds} samples={samples} valueKey="cpu" max={cpuMax} formatter={(value) => `${value.toFixed(1)}%`} />
           <MetricChart title={t.ramRss} subtitle={t.last60Seconds} samples={samples} valueKey="rss" max={rssMax} formatter={formatBytes} />
         </div>
       </div>
@@ -914,11 +970,22 @@ function MetricChart({
   const plotted = samples.filter((sample) => sample.running || sample[valueKey] > 0);
   const latestSample = samples.length ? samples[samples.length - 1] : undefined;
   const latest = latestSample?.[valueKey] || 0;
-  const points = plotted.map((sample, index) => {
+  const chartPoints = plotted.map((sample, index) => {
     const x = padding + (index / Math.max(plotted.length - 1, 1)) * (width - padding * 2);
     const y = height - padding - (Math.min(sample[valueKey], max) / Math.max(max, 1)) * (height - padding * 2);
-    return `${x.toFixed(2)},${y.toFixed(2)}`;
-  }).join(" ");
+    return { x, y };
+  });
+  const points = chartPoints.map((point) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(" ");
+  const baseline = height - padding;
+  const areaPath = chartPoints.length
+    ? [
+        `M ${chartPoints[0].x.toFixed(2)} ${baseline.toFixed(2)}`,
+        ...chartPoints.map((point) => `L ${point.x.toFixed(2)} ${point.y.toFixed(2)}`),
+        `L ${chartPoints[chartPoints.length - 1].x.toFixed(2)} ${baseline.toFixed(2)}`,
+        "Z"
+      ].join(" ")
+    : "";
+  const latestPoint = chartPoints[chartPoints.length - 1];
 
   return (
     <div className="metric-chart">
@@ -931,10 +998,12 @@ function MetricChart({
       </div>
       {plotted.length > 1 ? (
         <svg className="chart-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${title} chart`}>
-          <path d={`M ${padding} ${height - padding} H ${width - padding}`} />
-          <path d={`M ${padding} ${height * 0.66} H ${width - padding}`} />
-          <path d={`M ${padding} ${height * 0.33} H ${width - padding}`} />
-          <polyline points={points} />
+          <path className="chart-grid-line" d={`M ${padding} ${height - padding} H ${width - padding}`} />
+          <path className="chart-grid-line" d={`M ${padding} ${height * 0.66} H ${width - padding}`} />
+          <path className="chart-grid-line" d={`M ${padding} ${height * 0.33} H ${width - padding}`} />
+          <path className="chart-area" d={areaPath} />
+          <polyline className="chart-line" points={points} />
+          {latestPoint && <circle className="chart-point" cx={latestPoint.x} cy={latestPoint.y} r="4" />}
         </svg>
       ) : (
         <div className="chart-empty">{samples.length ? formatter(latest) : "No samples"}</div>
@@ -953,50 +1022,77 @@ function Metric({ icon, label, value, progress }: { icon: React.ReactNode; label
   );
 }
 
-function UpdateView({ api, t }: { api: ApiFn; t: Copy }) {
-  const [status, setStatus] = useState<Record<string, unknown> | null>(null);
-  const [repo, setRepo] = useState("");
+function UpdateWidget({ api, t }: { api: ApiFn; t: Copy }) {
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
   async function load() {
-    const [cfg, nextStatus] = await Promise.all([
-      api<{ githubRepo: string }>("/config"),
-      api<Record<string, unknown>>("/update/status")
-    ]);
-    setRepo(cfg.githubRepo || "");
-    setStatus(nextStatus);
+    setBusy(true);
+    setMessage("");
+    try {
+      const nextStatus = await api<UpdateStatus>("/update/status");
+      setStatus(nextStatus);
+      if (!nextStatus.available) {
+        setMessage(t.noUpdateAvailable);
+        return;
+      }
+      if (confirm(t.updateConfirm)) {
+        await apply(nextStatus);
+      }
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Update check failed");
+    } finally {
+      setBusy(false);
+    }
   }
+
+  async function apply(nextStatus: UpdateStatus) {
+    if (!nextStatus.available) {
+      setMessage(t.noUpdateAvailable);
+      return;
+    }
+    const body = await api<Record<string, unknown>>("/update/apply", { method: "POST", body: "{}" });
+    setMessage(JSON.stringify(body));
+  }
+
   useEffect(() => {
-    load().catch((err) => setMessage(err.message));
+    api<UpdateStatus>("/update/status").then(setStatus).catch((err) => setMessage(err.message));
   }, []);
+
+  const releasesUrl = status?.releaseUrl || "https://github.com/rekis-0103/MyPanel/releases";
+
   return (
-    <section className="update-panel">
-      <h2>{t.selfUpdate}</h2>
-      <label>
-        {t.githubRepo}
-        <input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="owner/repo" />
-      </label>
-      <button
-        onClick={async () => {
-          await api("/config", { method: "PATCH", body: JSON.stringify({ githubRepo: repo }) });
-          await load();
-        }}
-      >
-        <Save size={16} /> {t.saveRepo}
-      </button>
-      <pre>{JSON.stringify(status, null, 2)}</pre>
-      {message && <div className="alert">{message}</div>}
-      <button
-        className="primary"
-        onClick={async () => {
-          const body = await api<Record<string, unknown>>("/update/apply", { method: "POST", body: "{}" });
-          setMessage(JSON.stringify(body));
-        }}
-      >
-        <Download size={16} /> {t.applyUpdate}
-      </button>
+    <section className="update-card">
+      <div className="update-card-head">
+        <span className="section-kicker">{t.update}</span>
+        <strong>{status?.latest || t.selfUpdate}</strong>
+      </div>
+      <div className={`update-state ${status?.available ? "available" : ""}`}>
+        {status?.available ? t.updateAvailable : t.noUpdateAvailable}
+      </div>
+      <div className="update-actions">
+        <button onClick={load} disabled={busy}>
+          <RefreshCcw size={15} /> {t.checkUpdate}
+        </button>
+        <a className="update-link" href={releasesUrl} target="_blank" rel="noreferrer" title={t.openReleases}>
+          <ExternalLink size={15} /> {t.openReleases}
+        </a>
+      </div>
+      {message && <p className="update-message">{message}</p>}
     </section>
   );
 }
+
+type UpdateStatus = {
+  configured?: boolean;
+  current?: string;
+  latest?: string;
+  releaseUrl?: string;
+  assetUrl?: string;
+  available?: boolean;
+  repo?: string;
+};
 
 function formatBytes(value: number) {
   if (!value) return "0 B";

@@ -76,12 +76,14 @@ func TestJSONStoreCreatesAndUpdatesAtomically(t *testing.T) {
 
 func TestConsoleWebSocketUpgradesThroughStatusWriter(t *testing.T) {
 	a := &App{
+		console:   NewConsoleHub(consoleMaxBytes),
 		processes: NewProcessManager(nil),
 		updater: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 	}
 	server := Server{ID: "srv_test"}
+	a.console.Append(server.ID, "[mypanel] previous shutdown log\r\n")
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ww := &statusWriter{ResponseWriter: w, status: 200}
 		a.handleConsoleWS(ww, r, server)
@@ -99,7 +101,84 @@ func TestConsoleWebSocketUpgradesThroughStatusWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(msg), "Server is not running") {
+	if !strings.Contains(string(msg), "previous shutdown log") {
 		t.Fatalf("unexpected console message: %q", msg)
+	}
+}
+
+func TestConsoleHubKeepsHistoryAfterSubscriberLeaves(t *testing.T) {
+	hub := NewConsoleHub(1024)
+	ch := hub.Subscribe("srv_test")
+	hub.Append("srv_test", "server booting\r\n")
+	hub.Unsubscribe("srv_test", ch)
+
+	snapshot := strings.Join(hub.Snapshot("srv_test"), "")
+	if !strings.Contains(snapshot, "server booting") {
+		t.Fatalf("expected retained console history, got %q", snapshot)
+	}
+}
+
+func TestConsoleHubTrimsByByteLimit(t *testing.T) {
+	hub := NewConsoleHub(10)
+	hub.Append("srv_test", "12345")
+	hub.Append("srv_test", "67890")
+	hub.Append("srv_test", "abc")
+
+	snapshot := strings.Join(hub.Snapshot("srv_test"), "")
+	if snapshot != "67890abc" {
+		t.Fatalf("unexpected trimmed console history: %q", snapshot)
+	}
+
+	hub.Append("srv_test", "abcdefghijklmnopqrstuvwxyz")
+	snapshot = strings.Join(hub.Snapshot("srv_test"), "")
+	if snapshot != "qrstuvwxyz" {
+		t.Fatalf("unexpected oversized message trim: %q", snapshot)
+	}
+}
+
+func TestSameVersionIgnoresLeadingV(t *testing.T) {
+	if !sameVersion("v1.2.3", "1.2.3") {
+		t.Fatal("expected versions with leading v to match")
+	}
+	if sameVersion("v1.2.4", "1.2.3") {
+		t.Fatal("expected different versions not to match")
+	}
+}
+
+func TestMetricSamplerCalculatesRawMulticoreCPU(t *testing.T) {
+	sampler := NewMetricSampler()
+	base := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+
+	if got := sampler.SampleValue("srv_test", 100, 200, base, 10); got != 0 {
+		t.Fatalf("first sample should warm up, got %.2f", got)
+	}
+	if got := sampler.SampleValue("srv_test", 100, 200, base.Add(2*time.Second), 15); got != 250 {
+		t.Fatalf("expected raw multicore CPU 250, got %.2f", got)
+	}
+}
+
+func TestMetricSamplerResetsWhenProcessChanges(t *testing.T) {
+	sampler := NewMetricSampler()
+	base := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+	sampler.SampleValue("srv_test", 100, 200, base, 10)
+
+	if got := sampler.SampleValue("srv_test", 101, 300, base.Add(time.Second), 30); got != 0 {
+		t.Fatalf("expected process change to reset baseline, got %.2f", got)
+	}
+	if got := sampler.SampleValue("srv_test", 101, 300, base.Add(2*time.Second), 31); got != 100 {
+		t.Fatalf("expected new process delta after reset, got %.2f", got)
+	}
+}
+
+func TestMetricSamplerRejectsInvalidDelta(t *testing.T) {
+	sampler := NewMetricSampler()
+	base := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+	sampler.SampleValue("srv_test", 100, 200, base, 10)
+
+	if got := sampler.SampleValue("srv_test", 100, 200, base, 11); got != 0 {
+		t.Fatalf("expected zero for non-positive wall delta, got %.2f", got)
+	}
+	if got := sampler.SampleValue("srv_test", 100, 200, base.Add(time.Second), 9); got != 0 {
+		t.Fatalf("expected zero for negative CPU delta, got %.2f", got)
 	}
 }
