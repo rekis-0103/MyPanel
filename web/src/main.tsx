@@ -10,6 +10,7 @@ import {
   Folder,
   HardDrive,
   LogOut,
+  Moon,
   Plus,
   Power,
   RefreshCcw,
@@ -17,6 +18,7 @@ import {
   Server as ServerIcon,
   Shield,
   Square,
+  Sun,
   TerminalSquare,
   Trash2,
   Upload
@@ -68,9 +70,14 @@ type MetricSample = {
 };
 
 type Lang = "en" | "id";
+type Theme = "light" | "dark";
 type Copy = typeof copy.en;
 
 const apiBase = "/api/v1";
+
+function getInitialTheme(): Theme {
+  return localStorage.getItem("mypanel.theme") === "dark" ? "dark" : "light";
+}
 
 const copy = {
   en: {
@@ -133,6 +140,12 @@ const copy = {
     currentSession: "Current session",
     connectionReady: "Ready",
     language: "Language",
+    theme: "Theme",
+    lightTheme: "Light mode",
+    darkTheme: "Dark mode",
+    authPortableLabel: "Runtime",
+    authSecurityLabel: "Access",
+    authTunnelLabel: "Tunnel",
     jvmProcess: "JVM process",
     samplingEverySecond: "1s sampling",
     last60Seconds: "Last 60 seconds",
@@ -202,6 +215,12 @@ const copy = {
     currentSession: "Sesi aktif",
     connectionReady: "Siap",
     language: "Bahasa",
+    theme: "Tema",
+    lightTheme: "Mode terang",
+    darkTheme: "Mode gelap",
+    authPortableLabel: "Runtime",
+    authSecurityLabel: "Akses",
+    authTunnelLabel: "Tunnel",
     jvmProcess: "Proses JVM",
     samplingEverySecond: "Sampling 1 detik",
     last60Seconds: "60 detik terakhir",
@@ -221,14 +240,26 @@ function App() {
   const [view, setView] = useState<"console" | "files" | "metrics" | "update">("console");
   const [error, setError] = useState("");
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("mypanel.lang") as Lang) || "en");
+  const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const t = copy[lang];
 
   const selected = servers.find((server) => server.id === selectedId) || servers[0];
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+  }, [theme]);
 
   function toggleLang() {
     const next = lang === "en" ? "id" : "en";
     localStorage.setItem("mypanel.lang", next);
     setLang(next);
+  }
+
+  function toggleTheme() {
+    const next = theme === "light" ? "dark" : "light";
+    localStorage.setItem("mypanel.theme", next);
+    setTheme(next);
   }
 
   async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -280,7 +311,7 @@ function App() {
   }
 
   if (!token || !user) {
-    return <AuthScreen onToken={loginDone} lang={lang} t={t} onToggleLang={toggleLang} />;
+    return <AuthScreen onToken={loginDone} lang={lang} theme={theme} t={t} onToggleLang={toggleLang} onToggleTheme={toggleTheme} />;
   }
 
   return (
@@ -333,6 +364,7 @@ function App() {
           <button className="icon-button lang-button" onClick={toggleLang} title={t.language}>
             {lang.toUpperCase()}
           </button>
+          <ThemeToggle theme={theme} label={`${t.theme}: ${theme === "light" ? t.darkTheme : t.lightTheme}`} onClick={toggleTheme} />
           <button className="icon-button" onClick={logout} title={t.logout}>
             <LogOut size={16} />
           </button>
@@ -447,6 +479,14 @@ function LanguageToggle({ lang, label, onClick }: { lang: Lang; label: string; o
   );
 }
 
+function ThemeToggle({ theme, label, onClick }: { theme: Theme; label: string; onClick: () => void }) {
+  return (
+    <button className="icon-button theme-button" type="button" onClick={onClick} title={label} aria-label={label}>
+      {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
+    </button>
+  );
+}
+
 function InfoTile({ label, value, tone = "default", mono = false, wide = false }: { label: string; value: string; tone?: "default" | "good" | "muted"; mono?: boolean; wide?: boolean }) {
   return (
     <div className={`info-tile ${tone} ${wide ? "wide" : ""}`}>
@@ -456,7 +496,21 @@ function InfoTile({ label, value, tone = "default", mono = false, wide = false }
   );
 }
 
-function AuthScreen({ onToken, lang, t, onToggleLang }: { onToken: (token: string) => void; lang: Lang; t: Copy; onToggleLang: () => void }) {
+function AuthScreen({
+  onToken,
+  lang,
+  theme,
+  t,
+  onToggleLang,
+  onToggleTheme
+}: {
+  onToken: (token: string) => void;
+  lang: Lang;
+  theme: Theme;
+  t: Copy;
+  onToggleLang: () => void;
+  onToggleTheme: () => void;
+}) {
   const [mode, setMode] = useState<"login" | "setup">("login");
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
@@ -505,15 +559,18 @@ function AuthScreen({ onToken, lang, t, onToggleLang }: { onToken: (token: strin
             <h2>Portable Minecraft control surface</h2>
             <p>{t.overviewCopy}</p>
             <div className="auth-feature-grid">
-              <AuthFeature label="01" value={t.portableBinary} />
-              <AuthFeature label="02" value={t.jwtSecured} />
-              <AuthFeature label="03" value={t.tunnelReady} />
+              <AuthFeature label={t.authPortableLabel} value={t.portableBinary} />
+              <AuthFeature label={t.authSecurityLabel} value={t.jwtSecured} />
+              <AuthFeature label={t.authTunnelLabel} value={t.tunnelReady} />
             </div>
           </div>
         </aside>
 
         <form className="auth-panel" onSubmit={submit}>
-          <LanguageToggle lang={lang} label={t.language} onClick={onToggleLang} />
+          <div className="auth-controls">
+            <ThemeToggle theme={theme} label={`${t.theme}: ${theme === "light" ? t.darkTheme : t.lightTheme}`} onClick={onToggleTheme} />
+            <LanguageToggle lang={lang} label={t.language} onClick={onToggleLang} />
+          </div>
           <div>
             <span className="section-kicker">{mode === "setup" ? t.setupFirst : t.signIn}</span>
             <h1>{mode === "setup" ? t.setupTitle : t.loginTitle}</h1>
