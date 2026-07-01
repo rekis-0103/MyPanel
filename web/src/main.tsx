@@ -825,41 +825,43 @@ function Files({ server, api, token, t }: { server: Server; api: ApiFn; token: s
             <input type="file" onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])} />
           </label>
         </div>
-        <div className="file-columns">
-          <span>{t.nameColumn}</span>
-          <span>{t.sizeColumn}</span>
-        </div>
-        {path !== "." && <button className="file-row" onClick={() => load(path.split("/").slice(0, -1).join("/") || ".")}><Folder size={16} /> ..</button>}
-        {entries.length === 0 && <p className="panel-empty">{t.emptyFolder}</p>}
-        {entries.map((entry) => (
-          <div className="file-row" key={entry.path}>
-            <button className="file-open" onClick={() => openFile(entry)}>
-              {entry.dir ? <Folder size={16} /> : <FileText size={16} />}
-              <span>{entry.name}</span>
-              <small>{entry.dir ? "folder" : formatBytes(entry.size)}</small>
-            </button>
-            {!entry.dir && (
-              <a className="icon-link" href={`${apiBase}/servers/${server.id}/files/download?path=${encodeURIComponent(entry.path)}&token=${encodeURIComponent(token)}`} title="Download">
-                <Download size={15} />
-              </a>
-            )}
-            <button
-              className="icon-danger"
-              title="Delete"
-              onClick={async () => {
-                if (!confirm(`Delete ${entry.path}?`)) return;
-                await api(`/servers/${server.id}/files/content?path=${encodeURIComponent(entry.path)}`, { method: "DELETE" });
-                if (editing === entry.path) {
-                  setEditing("");
-                  setContent("");
-                }
-                await load();
-              }}
-            >
-              <Trash2 size={15} />
-            </button>
+        <div className="file-scroll">
+          <div className="file-columns">
+            <span>{t.nameColumn}</span>
+            <span>{t.sizeColumn}</span>
           </div>
-        ))}
+          {path !== "." && <button className="file-row" onClick={() => load(path.split("/").slice(0, -1).join("/") || ".")}><Folder size={16} /> ..</button>}
+          {entries.length === 0 && <p className="panel-empty">{t.emptyFolder}</p>}
+          {entries.map((entry) => (
+            <div className="file-row" key={entry.path}>
+              <button className="file-open" onClick={() => openFile(entry)}>
+                {entry.dir ? <Folder size={16} /> : <FileText size={16} />}
+                <span>{entry.name}</span>
+                <small>{entry.dir ? "folder" : formatBytes(entry.size)}</small>
+              </button>
+              {!entry.dir && (
+                <a className="icon-link" href={`${apiBase}/servers/${server.id}/files/download?path=${encodeURIComponent(entry.path)}&token=${encodeURIComponent(token)}`} title="Download">
+                  <Download size={15} />
+                </a>
+              )}
+              <button
+                className="icon-danger"
+                title="Delete"
+                onClick={async () => {
+                  if (!confirm(`Delete ${entry.path}?`)) return;
+                  await api(`/servers/${server.id}/files/content?path=${encodeURIComponent(entry.path)}`, { method: "DELETE" });
+                  if (editing === entry.path) {
+                    setEditing("");
+                    setContent("");
+                  }
+                  await load();
+                }}
+              >
+                <Trash2 size={15} />
+              </button>
+            </div>
+          ))}
+        </div>
       </div>
       <div className="editor">
         <div className="file-toolbar editor-toolbar">
