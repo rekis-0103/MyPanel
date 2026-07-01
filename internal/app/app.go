@@ -568,6 +568,11 @@ func (a *App) handleServer(w http.ResponseWriter, r *http.Request, server Server
 		if !decodeJSON(w, r, &req) {
 			return
 		}
+		startupChange := req.JavaPath != nil || req.Jar != nil || req.JVMArgs != nil || req.MCArgs != nil
+		if startupChange && a.processes.IsRunning(server.ID) {
+			writeErr(w, r, http.StatusConflict, "server_running", "Stop the server before changing startup settings")
+			return
+		}
 		var updated Server
 		err := a.servers.Update(func(servers []Server) ([]Server, error) {
 			for i := range servers {

@@ -234,8 +234,7 @@ small {
   background: var(--blue-soft);
 }
 
-.new-server,
-.inline-add {
+.new-server {
   width: 100%;
   justify-content: flex-start;
 }
@@ -534,6 +533,7 @@ small {
 .info-tile,
 .command-panel,
 .create-strip,
+.startup-panel,
 .auth-panel,
 .auth-command-card {
   border: 1px solid var(--line);
@@ -625,6 +625,31 @@ small {
 
 .command-panel {
   overflow: hidden;
+}
+
+.empty-register {
+  min-height: 320px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 28px;
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  gap: 18px;
+}
+
+.empty-register h2 {
+  margin: 4px 0 8px;
+  font-size: 28px;
+  line-height: 1.1;
+}
+
+.empty-register p {
+  max-width: 520px;
+  margin: 0;
+  color: var(--muted);
 }
 
 .command-panel-head {
@@ -742,6 +767,58 @@ small {
   align-items: end;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  padding: 24px;
+  display: grid;
+  place-items: center;
+  background: rgba(7, 17, 31, .56);
+}
+
+.register-modal {
+  width: min(860px, 100%);
+  max-height: min(720px, calc(100vh - 48px));
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.modal-head {
+  min-height: 72px;
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  background: var(--surface-soft);
+}
+
+.modal-head h2 {
+  margin: 3px 0 0;
+  font-size: 22px;
+  line-height: 1.1;
+}
+
+.register-modal .create-strip {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.register-modal .form-intro {
+  grid-column: 1 / -1;
+  border-right: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 0 0 12px;
+}
+
 .form-intro {
   align-self: stretch;
   display: grid;
@@ -781,6 +858,64 @@ textarea {
 input::placeholder,
 textarea::placeholder {
   color: var(--dim);
+}
+
+input:disabled,
+textarea:disabled {
+  color: var(--dim);
+  background: var(--surface-strong);
+  cursor: not-allowed;
+}
+
+.startup-panel {
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.startup-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.startup-head strong {
+  display: block;
+  font-size: 18px;
+}
+
+.startup-head p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.startup-preview textarea {
+  min-height: 96px;
+  border-color: #1d2d44;
+  background: #050b14;
+  color: #dbeafe;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.startup-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.startup-grid .wide {
+  grid-column: span 2;
+}
+
+.startup-message {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .files-grid {
@@ -1286,6 +1421,7 @@ textarea::placeholder {
 
   .create-strip,
   .metrics,
+  .startup-grid,
   .chart-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1317,7 +1453,8 @@ textarea::placeholder {
   }
 
   .topbar,
-  .command-panel-head {
+  .command-panel-head,
+  .startup-head {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -1330,8 +1467,29 @@ textarea::placeholder {
     flex: 1 1 130px;
   }
 
+  .modal-backdrop {
+    padding: 12px;
+    align-items: start;
+  }
+
+  .register-modal {
+    max-height: calc(100vh - 24px);
+  }
+
+  .modal-head {
+    align-items: flex-start;
+  }
+
   .files-grid {
     height: auto;
+  }
+
+  .startup-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .startup-grid .wide {
+    grid-column: auto;
   }
 
   .file-list {

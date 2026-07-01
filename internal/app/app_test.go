@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -142,6 +143,35 @@ func TestSameVersionIgnoresLeadingV(t *testing.T) {
 	}
 	if sameVersion("v1.2.4", "1.2.3") {
 		t.Fatal("expected different versions not to match")
+	}
+}
+
+func TestHandleServerRejectsStartupPatchWhileRunning(t *testing.T) {
+	store := NewJSONStore(filepath.Join(t.TempDir(), "servers.json"), []Server{})
+	server := Server{ID: "srv_test", Name: "Survival", JavaPath: "java", Jar: "server.jar", JVMArgs: []string{"-Xms2G", "-Xmx2G"}, MCArgs: []string{"nogui"}}
+	if err := store.Update(func(_ []Server) ([]Server, error) {
+		return []Server{server}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &App{servers: store, processes: NewProcessManager(nil)}
+	a.processes.runtimes[server.ID] = &Runtime{}
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/srv_test", strings.NewReader(`{"jar":"paper.jar"}`))
+	req = req.WithContext(context.WithValue(req.Context(), ctxUser{}, User{Role: "operator"}))
+	rr := httptest.NewRecorder()
+
+	a.handleServer(rr, req, server)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected conflict while running, got %d: %s", rr.Code, rr.Body.String())
+	}
+	servers, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if servers[0].Jar != "server.jar" {
+		t.Fatalf("startup config changed while running: %#v", servers[0])
 	}
 }
 

@@ -19,11 +19,13 @@ import {
   Send,
   Server as ServerIcon,
   Shield,
+  SlidersHorizontal,
   Square,
   Sun,
   TerminalSquare,
   Trash2,
-  Upload
+  Upload,
+  X
 } from "lucide-react";
 import "./styles.css";
 
@@ -109,6 +111,7 @@ const copy = {
     console: "Console",
     files: "Files",
     metrics: "Metrics",
+    startup: "Startup",
     update: "Update",
     status: "Status",
     processId: "Process ID",
@@ -125,6 +128,7 @@ const copy = {
     addAnother: "Add another server",
     formTitle: "Register server",
     formHelp: "Use an existing folder name inside the server/ directory.",
+    cancel: "Cancel",
     serverName: "Server name",
     folder: "Folder",
     ram: "RAM",
@@ -172,7 +176,18 @@ const copy = {
     consoleDisconnected: "Disconnected",
     consoleStopped: "Server is not running. Press Start to open a live console.",
     consoleCommandPlaceholder: "Type a server command or message",
-    sendCommand: "Send"
+    sendCommand: "Send",
+    startupCommand: "Startup command",
+    startupPreview: "Preview",
+    startupHelp: "This command is used the next time the server starts.",
+    minimumRam: "Minimum RAM",
+    maximumRam: "Maximum RAM",
+    additionalFlags: "Additional JVM flags",
+    jarName: "Jar name",
+    saveStartup: "Save startup",
+    startupSaved: "Startup settings saved.",
+    startupLocked: "Stop the server before editing startup settings.",
+    flagsPlaceholder: "-XX:+UseG1GC -XX:+ParallelRefProcEnabled"
   },
   id: {
     appSubtitle: "Konsol operasi server",
@@ -191,6 +206,7 @@ const copy = {
     console: "Konsol",
     files: "Berkas",
     metrics: "Metrik",
+    startup: "Startup",
     update: "Update",
     status: "Status",
     processId: "Process ID",
@@ -207,6 +223,7 @@ const copy = {
     addAnother: "Tambah server lain",
     formTitle: "Daftarkan server",
     formHelp: "Gunakan nama folder yang sudah ada di direktori server/.",
+    cancel: "Batal",
     serverName: "Nama server",
     folder: "Folder",
     ram: "RAM",
@@ -254,7 +271,18 @@ const copy = {
     consoleDisconnected: "Terputus",
     consoleStopped: "Server belum berjalan. Tekan Start untuk membuka konsol live.",
     consoleCommandPlaceholder: "Ketik command atau pesan server",
-    sendCommand: "Kirim"
+    sendCommand: "Kirim",
+    startupCommand: "Perintah startup",
+    startupPreview: "Preview",
+    startupHelp: "Perintah ini dipakai saat server dijalankan berikutnya.",
+    minimumRam: "RAM minimal",
+    maximumRam: "RAM maksimal",
+    additionalFlags: "Flag JVM tambahan",
+    jarName: "Nama jar",
+    saveStartup: "Simpan startup",
+    startupSaved: "Pengaturan startup tersimpan.",
+    startupLocked: "Matikan server sebelum mengubah startup.",
+    flagsPlaceholder: "-XX:+UseG1GC -XX:+ParallelRefProcEnabled"
   }
 };
 
@@ -263,7 +291,8 @@ function App() {
   const [user, setUser] = useState<User | null>(null);
   const [servers, setServers] = useState<Server[]>([]);
   const [selectedId, setSelectedId] = useState("");
-  const [view, setView] = useState<"console" | "files" | "metrics">("console");
+  const [view, setView] = useState<"console" | "files" | "metrics" | "startup">("console");
+  const [registerOpen, setRegisterOpen] = useState(false);
   const [error, setError] = useState("");
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("mypanel.lang") as Lang) || "en");
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
@@ -354,7 +383,7 @@ function App() {
           <span className="build-badge">LOCAL</span>
         </div>
 
-        <button className="new-server" onClick={() => setView("console")}>
+        <button className="new-server" onClick={() => setRegisterOpen(true)}>
           <Plus size={16} /> {t.registerServer}
         </button>
 
@@ -396,6 +425,9 @@ function App() {
             <button className={view === "metrics" ? "active" : ""} onClick={() => setView("metrics")}>
               <Activity size={16} /> {t.metrics}
             </button>
+            <button className={view === "startup" ? "active" : ""} onClick={() => setView("startup")}>
+              <SlidersHorizontal size={16} /> {t.startup}
+            </button>
           </nav>
         )}
 
@@ -434,7 +466,16 @@ function App() {
         {error && <div className="alert">{error}</div>}
 
         {!selected ? (
-          <CreateServer api={api} onDone={refresh} t={t} />
+          <section className="empty-register">
+            <div>
+              <span className="section-kicker">{t.instances}</span>
+              <h2>{t.noServerTitle}</h2>
+              <p>{t.formHelp}</p>
+            </div>
+            <button className="primary" onClick={() => setRegisterOpen(true)}>
+              <Plus size={16} /> {t.registerServer}
+            </button>
+          </section>
         ) : (
           <>
             <StatusDeck selected={selected} servers={servers} t={t} />
@@ -451,13 +492,32 @@ function App() {
                 {view === "console" && <Console server={selected} token={token} t={t} />}
                 {view === "files" && <Files server={selected} api={api} token={token} t={t} />}
                 {view === "metrics" && <MetricsView server={selected} api={api} t={t} />}
+                {view === "startup" && <StartupSettings server={selected} api={api} onDone={refresh} t={t} />}
               </div>
             </section>
-
-            <CreateServer compact api={api} onDone={refresh} t={t} />
           </>
         )}
       </main>
+
+      {registerOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setRegisterOpen(false)}>
+          <section className="register-modal" role="dialog" aria-modal="true" aria-labelledby="register-server-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <div>
+                <span className="section-kicker">{t.registerServer}</span>
+                <h2 id="register-server-title">{t.formTitle}</h2>
+              </div>
+              <button className="icon-button" type="button" onClick={() => setRegisterOpen(false)} title={t.cancel} aria-label={t.cancel}>
+                <X size={16} />
+              </button>
+            </div>
+            <CreateServer api={api} onDone={async () => {
+              await refresh();
+              setRegisterOpen(false);
+            }} t={t} onCancel={() => setRegisterOpen(false)} />
+          </section>
+        </div>
+      )}
     </div>
   );
 }
@@ -643,16 +703,11 @@ function RuntimeButton({ server, api, onDone }: { server: Server; api: ApiFn; on
 
 type ApiFn = <T>(path: string, init?: RequestInit) => Promise<T>;
 
-function CreateServer({ api, onDone, t, compact = false }: { api: ApiFn; onDone: () => Promise<void>; t: Copy; compact?: boolean }) {
-  const [open, setOpen] = useState(!compact);
+function CreateServer({ api, onDone, t, onCancel }: { api: ApiFn; onDone: () => Promise<void>; t: Copy; onCancel?: () => void }) {
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [jar, setJar] = useState("server.jar");
   const [ram, setRam] = useState("2G");
-
-  if (compact && !open) {
-    return <button className="inline-add" onClick={() => setOpen(true)}><Plus size={16} /> {t.addAnother}</button>;
-  }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -669,7 +724,6 @@ function CreateServer({ api, onDone, t, compact = false }: { api: ApiFn; onDone:
     });
     setName("");
     setSlug("");
-    setOpen(false);
     await onDone();
   }
 
@@ -683,9 +737,147 @@ function CreateServer({ api, onDone, t, compact = false }: { api: ApiFn; onDone:
       <label>{t.folder}<input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="survival" /></label>
       <label>Jar<input value={jar} onChange={(e) => setJar(e.target.value)} /></label>
       <label>{t.ram}<input value={ram} onChange={(e) => setRam(e.target.value)} /></label>
+      {onCancel && <button type="button" onClick={onCancel}>{t.cancel}</button>}
       <button className="primary"><Plus size={16} /> {t.create}</button>
     </form>
   );
+}
+
+function StartupSettings({ server, api, onDone, t }: { server: Server; api: ApiFn; onDone: () => Promise<void>; t: Copy }) {
+  const [minRam, setMinRam] = useState("");
+  const [maxRam, setMaxRam] = useState("");
+  const [flags, setFlags] = useState("");
+  const [jar, setJar] = useState("");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const jvmArgs = server.jvmArgs || [];
+    const min = extractJvmMemory(jvmArgs, "-Xms", "2G");
+    setMinRam(min);
+    setMaxRam(extractJvmMemory(jvmArgs, "-Xmx", min));
+    setFlags(jvmArgs.filter((arg) => !isMemoryArg(arg)).join(" "));
+    setJar(server.jar || "server.jar");
+    setMessage("");
+  }, [server.id, server.jar, server.jvmArgs]);
+
+  const additionalFlags = splitStartupArgs(flags).filter((arg) => !isMemoryArg(arg));
+  const mcArgs = server.mcArgs?.length ? server.mcArgs : ["nogui"];
+  const normalizedMinRam = minRam.trim() || "2G";
+  const normalizedMaxRam = maxRam.trim() || normalizedMinRam;
+  const normalizedJar = jar.trim() || "server.jar";
+  const previewArgs = [`-Xms${normalizedMinRam}`, `-Xmx${normalizedMaxRam}`, ...additionalFlags, "-jar", normalizedJar, ...mcArgs];
+  const preview = [server.javaPath || "java", ...previewArgs].map(quoteStartupArg).join(" ");
+  const disabled = server.running || busy;
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (server.running) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      await api<Server>(`/servers/${server.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          jar: normalizedJar,
+          javaPath: server.javaPath || "java",
+          jvmArgs: [`-Xms${normalizedMinRam}`, `-Xmx${normalizedMaxRam}`, ...additionalFlags],
+          mcArgs
+        })
+      });
+      await onDone();
+      setMessage(t.startupSaved);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Startup update failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="startup-panel" onSubmit={submit}>
+      <div className="startup-head">
+        <div>
+          <span className="section-kicker">{t.startupCommand}</span>
+          <strong>{server.name}</strong>
+          <p>{server.running ? t.startupLocked : t.startupHelp}</p>
+        </div>
+        <button className="primary" type="submit" disabled={disabled}>
+          <Save size={15} /> {t.saveStartup}
+        </button>
+      </div>
+
+      <label className="startup-preview">
+        {t.startupPreview}
+        <textarea value={preview} readOnly />
+      </label>
+
+      <div className="startup-grid">
+        <label>
+          {t.minimumRam}
+          <input value={minRam} onChange={(event) => setMinRam(event.target.value)} disabled={disabled} placeholder="2G" />
+        </label>
+        <label>
+          {t.maximumRam}
+          <input value={maxRam} onChange={(event) => setMaxRam(event.target.value)} disabled={disabled} placeholder="4G" />
+        </label>
+        <label className="wide">
+          {t.additionalFlags}
+          <input value={flags} onChange={(event) => setFlags(event.target.value)} disabled={disabled} placeholder={t.flagsPlaceholder} />
+        </label>
+        <label>
+          {t.jarName}
+          <input value={jar} onChange={(event) => setJar(event.target.value)} disabled={disabled} placeholder="server.jar" />
+        </label>
+      </div>
+
+      {message && <p className="startup-message">{message}</p>}
+    </form>
+  );
+}
+
+function extractJvmMemory(args: string[], prefix: "-Xms" | "-Xmx", fallback: string) {
+  const arg = args.find((item) => item.toLowerCase().startsWith(prefix.toLowerCase()));
+  return arg ? arg.slice(prefix.length) : fallback;
+}
+
+function isMemoryArg(arg: string) {
+  const lower = arg.toLowerCase();
+  return lower.startsWith("-xms") || lower.startsWith("-xmx");
+}
+
+function splitStartupArgs(value: string) {
+  const args: string[] = [];
+  let current = "";
+  let quote = "";
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i];
+    if ((char === "\"" || char === "'") && !quote) {
+      quote = char;
+      continue;
+    }
+    if (quote && char === quote) {
+      quote = "";
+      continue;
+    }
+    if (!quote && /\s/.test(char)) {
+      if (current) {
+        args.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (current) args.push(current);
+  return args;
+}
+
+function quoteStartupArg(value: string) {
+  if (!value || /[\s"]/.test(value)) {
+    return `"${value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
+  }
+  return value;
 }
 
 function Console({ server, token, t }: { server: Server; token: string; t: Copy }) {
