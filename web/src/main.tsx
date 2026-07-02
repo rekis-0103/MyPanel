@@ -5,6 +5,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import {
   Activity,
+  Archive,
+  ClipboardList,
   Download,
   ExternalLink,
   FileText,
@@ -29,7 +31,9 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-type Role = "viewer" | "operator" | "admin";
+type Role = "user" | "admin";
+type RuntimeState = "stopped" | "starting" | "running" | "stopping";
+type RuntimeLike = { running: boolean; runtimeState?: RuntimeState };
 
 type User = {
   id: string;
@@ -47,6 +51,7 @@ type Server = {
   jvmArgs: string[];
   mcArgs: string[];
   running: boolean;
+  runtimeState: RuntimeState;
   pid: number;
 };
 
@@ -60,6 +65,7 @@ type FileEntry = {
 
 type Metrics = {
   running: boolean;
+  runtimeState: RuntimeState;
   sampledAt: string;
   disk: { bytes: number };
   process?: {
@@ -81,6 +87,33 @@ type MetricSample = {
   rss: number;
   disk: number;
   running: boolean;
+};
+
+type BackupEntry = {
+  id: string;
+  serverId: string;
+  name: string;
+  size: number;
+  createdAt: string;
+};
+
+type LogFile = {
+  path: string;
+  name: string;
+  size: number;
+  modTime: string;
+};
+
+type AuditEntry = {
+  id: string;
+  time: string;
+  actorUsername: string;
+  actorRole: Role;
+  action: string;
+  targetType: string;
+  targetId: string;
+  targetName: string;
+  status: number;
 };
 
 type Lang = "en" | "id";
@@ -112,17 +145,19 @@ const copy = {
     files: "Files",
     metrics: "Metrics",
     startup: "Startup",
+    operations: "Operations",
+    audit: "Audit",
     update: "Update",
     status: "Status",
     processId: "Process ID",
     jarFile: "Jar file",
     workingFolder: "Working folder",
     loginTitle: "Sign in to MyPanel",
-    setupTitle: "Create the first admin",
+    setupTitle: "Create the first user",
     username: "Username",
     password: "Password",
     signIn: "Sign in",
-    createAdmin: "Create admin",
+    createAdmin: "Create user",
     setupFirst: "First run setup",
     backToLogin: "Back to login",
     addAnother: "Add another server",
@@ -138,7 +173,9 @@ const copy = {
     chooseText: "Choose a text file",
     save: "Save",
     stopped: "Stopped",
+    starting: "Starting",
     running: "Running",
+    stopping: "Stopping",
     ramRss: "RAM RSS",
     folderSize: "Folder size",
     selfUpdate: "Self-update",
@@ -187,7 +224,21 @@ const copy = {
     saveStartup: "Save startup",
     startupSaved: "Startup settings saved.",
     startupLocked: "Stop the server before editing startup settings.",
-    flagsPlaceholder: "-XX:+UseG1GC -XX:+ParallelRefProcEnabled"
+    flagsPlaceholder: "-XX:+UseG1GC -XX:+ParallelRefProcEnabled",
+    backups: "Backups",
+    logs: "Logs",
+    createBackup: "Create backup",
+    backupHelp: "Full server backup. Stop the server before backup or restore.",
+    backupLocked: "Stop the server before backup or restore.",
+    restore: "Restore",
+    latestLogs: "Latest logs",
+    chooseLog: "Choose a log file",
+    auditTrail: "Audit trail",
+    actor: "Actor",
+    action: "Action",
+    target: "Target",
+    time: "Time",
+    noAudit: "No audit entries yet."
   },
   id: {
     appSubtitle: "Konsol operasi server",
@@ -207,17 +258,19 @@ const copy = {
     files: "Berkas",
     metrics: "Metrik",
     startup: "Startup",
+    operations: "Operations",
+    audit: "Audit",
     update: "Update",
     status: "Status",
     processId: "Process ID",
     jarFile: "File jar",
     workingFolder: "Folder kerja",
     loginTitle: "Masuk ke MyPanel",
-    setupTitle: "Buat admin pertama",
+    setupTitle: "Buat user pertama",
     username: "Username",
     password: "Password",
     signIn: "Masuk",
-    createAdmin: "Buat admin",
+    createAdmin: "Buat user",
     setupFirst: "Setup pertama kali",
     backToLogin: "Kembali ke login",
     addAnother: "Tambah server lain",
@@ -233,7 +286,9 @@ const copy = {
     chooseText: "Pilih file teks",
     save: "Simpan",
     stopped: "Stopped",
+    starting: "Menyalakan",
     running: "Running",
+    stopping: "Mematikan",
     ramRss: "RAM RSS",
     folderSize: "Ukuran folder",
     selfUpdate: "Self-update",
@@ -282,7 +337,21 @@ const copy = {
     saveStartup: "Simpan startup",
     startupSaved: "Pengaturan startup tersimpan.",
     startupLocked: "Matikan server sebelum mengubah startup.",
-    flagsPlaceholder: "-XX:+UseG1GC -XX:+ParallelRefProcEnabled"
+    flagsPlaceholder: "-XX:+UseG1GC -XX:+ParallelRefProcEnabled",
+    backups: "Backup",
+    logs: "Log",
+    createBackup: "Buat backup",
+    backupHelp: "Backup full server. Matikan server sebelum backup atau restore.",
+    backupLocked: "Matikan server sebelum backup atau restore.",
+    restore: "Restore",
+    latestLogs: "Log terbaru",
+    chooseLog: "Pilih file log",
+    auditTrail: "Audit trail",
+    actor: "Aktor",
+    action: "Aksi",
+    target: "Target",
+    time: "Waktu",
+    noAudit: "Belum ada audit."
   }
 };
 
@@ -291,7 +360,7 @@ function App() {
   const [user, setUser] = useState<User | null>(null);
   const [servers, setServers] = useState<Server[]>([]);
   const [selectedId, setSelectedId] = useState("");
-  const [view, setView] = useState<"console" | "files" | "metrics" | "startup">("console");
+  const [view, setView] = useState<"console" | "files" | "metrics" | "startup" | "operations" | "audit">("console");
   const [registerOpen, setRegisterOpen] = useState(false);
   const [error, setError] = useState("");
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("mypanel.lang") as Lang) || "en");
@@ -353,6 +422,14 @@ function App() {
     });
   }, [token]);
 
+  useEffect(() => {
+    if (!token || !user) return;
+    const timer = window.setInterval(() => {
+      refresh().catch((err) => setError(err.message));
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [token, user?.id, selectedId]);
+
   function loginDone(nextToken: string) {
     localStorage.setItem("mypanel.token", nextToken);
     setToken(nextToken);
@@ -387,7 +464,7 @@ function App() {
           <Plus size={16} /> {t.registerServer}
         </button>
 
-        {user.role === "admin" && <UpdateWidget api={api} t={t} />}
+        <UpdateWidget api={api} t={t} />
 
         <div className="sidebar-stat">
           <span>{t.managedInstances}</span>
@@ -407,8 +484,8 @@ function App() {
                 <strong>{server.name}</strong>
                 <small>server/{server.slug}</small>
               </span>
-              <span className={`server-state ${server.running ? "running" : ""}`}>{server.running ? t.running : t.stopped}</span>
-              <i className={server.running ? "dot on" : "dot"} />
+              <span className={`server-state ${runtimeState(server)}`}>{runtimeLabel(server, t)}</span>
+              <i className={`dot ${runtimeState(server)}`} />
             </button>
           ))}
           {servers.length === 0 && <p className="empty">{t.noServers}</p>}
@@ -427,6 +504,12 @@ function App() {
             </button>
             <button className={view === "startup" ? "active" : ""} onClick={() => setView("startup")}>
               <SlidersHorizontal size={16} /> {t.startup}
+            </button>
+            <button className={view === "operations" ? "active" : ""} onClick={() => setView("operations")}>
+              <Archive size={16} /> {t.operations}
+            </button>
+            <button className={view === "audit" ? "active" : ""} onClick={() => setView("audit")}>
+              <ClipboardList size={16} /> {t.audit}
             </button>
           </nav>
         )}
@@ -458,7 +541,7 @@ function App() {
               <RefreshCcw size={16} /> {t.refresh}
             </button>
             {selected && (
-              <RuntimeButton server={selected} api={api} onDone={refresh} />
+              <RuntimeButton server={selected} api={api} onDone={refresh} t={t} />
             )}
           </div>
         </header>
@@ -493,6 +576,8 @@ function App() {
                 {view === "files" && <Files server={selected} api={api} token={token} t={t} />}
                 {view === "metrics" && <MetricsView server={selected} api={api} t={t} />}
                 {view === "startup" && <StartupSettings server={selected} api={api} onDone={refresh} t={t} />}
+                {view === "operations" && <OperationsView server={selected} api={api} token={token} t={t} />}
+                {view === "audit" && <AuditView api={api} t={t} />}
               </div>
             </section>
           </>
@@ -522,15 +607,32 @@ function App() {
   );
 }
 
+function runtimeState(server: RuntimeLike): RuntimeState {
+  return server.runtimeState || (server.running ? "running" : "stopped");
+}
+
+function runtimeLabel(server: RuntimeLike, t: Copy) {
+  const state = runtimeState(server);
+  if (state === "starting") return t.starting;
+  if (state === "stopping") return t.stopping;
+  if (state === "running") return t.running;
+  return t.stopped;
+}
+
+function runtimeActive(server: RuntimeLike) {
+  return runtimeState(server) !== "stopped";
+}
+
 function StatusDeck({ selected, servers, t }: { selected: Server; servers: Server[]; t: Copy }) {
-  const runningCount = servers.filter((server) => server.running).length;
+  const runningCount = servers.filter((server) => runtimeState(server) === "running").length;
+  const state = runtimeState(selected);
 
   return (
     <section className="status-deck" aria-label="Server status summary">
-      <div className={`status-hero ${selected.running ? "online" : ""}`}>
+      <div className={`status-hero ${state}`}>
         <div>
           <span className="section-kicker">{t.status}</span>
-          <strong>{selected.running ? t.running : t.stopped}</strong>
+          <strong>{runtimeLabel(selected, t)}</strong>
         </div>
         <div className="signal-stack" aria-hidden="true">
           <span />
@@ -679,8 +781,9 @@ function AuthScreen({
   );
 }
 
-function RuntimeButton({ server, api, onDone }: { server: Server; api: ApiFn; onDone: () => Promise<void> }) {
+function RuntimeButton({ server, api, onDone, t }: { server: Server; api: ApiFn; onDone: () => Promise<void>; t: Copy }) {
   const [busy, setBusy] = useState(false);
+  const state = runtimeState(server);
   async function setState(state: "running" | "stopped") {
     setBusy(true);
     try {
@@ -690,7 +793,13 @@ function RuntimeButton({ server, api, onDone }: { server: Server; api: ApiFn; on
       setBusy(false);
     }
   }
-  return server.running ? (
+  if (state === "starting") {
+    return <button disabled><Power size={16} /> {t.starting}</button>;
+  }
+  if (state === "stopping") {
+    return <button className="danger" disabled><Square size={16} /> {t.stopping}</button>;
+  }
+  return state === "running" ? (
     <button className="danger" disabled={busy} onClick={() => setState("stopped")}>
       <Square size={16} /> Stop
     </button>
@@ -768,11 +877,11 @@ function StartupSettings({ server, api, onDone, t }: { server: Server; api: ApiF
   const normalizedJar = jar.trim() || "server.jar";
   const previewArgs = [`-Xms${normalizedMinRam}`, `-Xmx${normalizedMaxRam}`, ...additionalFlags, "-jar", normalizedJar, ...mcArgs];
   const preview = [server.javaPath || "java", ...previewArgs].map(quoteStartupArg).join(" ");
-  const disabled = server.running || busy;
+  const disabled = runtimeActive(server) || busy;
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (server.running) return;
+    if (runtimeActive(server)) return;
     setBusy(true);
     setMessage("");
     try {
@@ -800,7 +909,7 @@ function StartupSettings({ server, api, onDone, t }: { server: Server; api: ApiF
         <div>
           <span className="section-kicker">{t.startupCommand}</span>
           <strong>{server.name}</strong>
-          <p>{server.running ? t.startupLocked : t.startupHelp}</p>
+          <p>{runtimeActive(server) ? t.startupLocked : t.startupHelp}</p>
         </div>
         <button className="primary" type="submit" disabled={disabled}>
           <Save size={15} /> {t.saveStartup}
@@ -885,7 +994,7 @@ function Console({ server, token, t }: { server: Server; token: string; t: Copy 
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const terminalRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
-  const [status, setStatus] = useState(server.running ? t.consoleConnecting : t.consoleHistory);
+  const [status, setStatus] = useState(runtimeActive(server) ? t.consoleConnecting : t.consoleHistory);
   const [connected, setConnected] = useState(false);
   const [command, setCommand] = useState("");
 
@@ -909,7 +1018,7 @@ function Console({ server, token, t }: { server: Server; token: string; t: Copy 
     ws.onmessage = (event) => terminal.write(event.data);
     ws.onopen = () => {
       setConnected(true);
-      setStatus(server.running ? t.consoleLive : t.consoleHistory);
+      setStatus(runtimeState(server) === "running" ? t.consoleLive : t.consoleHistory);
     };
     ws.onerror = () => {
       setStatus(t.consoleDisconnected);
@@ -929,18 +1038,18 @@ function Console({ server, token, t }: { server: Server; token: string; t: Copy 
       ws.close();
       terminal.dispose();
     };
-  }, [host, protocol, server.id, server.name, server.running, t, token]);
+  }, [host, protocol, server.id, server.name, server.runtimeState, server.running, t, token]);
 
   function sendCommand(event: React.FormEvent) {
     event.preventDefault();
     const text = command.trim();
     const ws = socketRef.current;
-    if (!text || !server.running || !connected || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!text || runtimeState(server) !== "running" || !connected || !ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(`${text}\n`);
     setCommand("");
   }
 
-  const commandDisabled = !server.running || !connected;
+  const commandDisabled = runtimeState(server) !== "running" || !connected;
 
   return (
     <section className="console-panel">
@@ -950,7 +1059,7 @@ function Console({ server, token, t }: { server: Server; token: string; t: Copy 
         <input
           value={command}
           onChange={(event) => setCommand(event.target.value)}
-          placeholder={server.running ? t.consoleCommandPlaceholder : t.consoleStopped}
+          placeholder={runtimeState(server) === "running" ? t.consoleCommandPlaceholder : t.consoleStopped}
           disabled={commandDisabled}
           autoComplete="off"
         />
@@ -1121,7 +1230,7 @@ function MetricsView({ server, api, t }: { server: Server; api: ApiFn; t: Copy }
   return (
     <section className="metrics-layout">
       <div className="metrics">
-        <Metric icon={<Power size={18} />} label={t.status} value={metrics?.running ? t.running : t.stopped} progress={metrics?.running ? 100 : 8} />
+        <Metric icon={<Power size={18} />} label={t.status} value={metrics ? runtimeLabel(metrics, t) : t.stopped} progress={metrics?.running ? 100 : 8} />
         <Metric icon={<Activity size={18} />} label="CPU" value={`${metrics?.process?.cpu?.toFixed(1) || "0.0"}%`} progress={Math.min(metrics?.process?.cpu || 0, 100)} />
         <Metric icon={<HardDrive size={18} />} label={t.ramRss} value={formatBytes(metrics?.process?.rss || 0)} progress={Math.min(((metrics?.process?.rss || 0) / rssMax) * 100, 100)} />
         <Metric icon={<Folder size={18} />} label={t.folderSize} value={formatBytes(metrics?.disk.bytes || 0)} progress={Math.min(((metrics?.disk.bytes || 0) / (1024 * 1024 * 1024 * 10)) * 100, 100)} />
@@ -1138,6 +1247,191 @@ function MetricsView({ server, api, t }: { server: Server; api: ApiFn; t: Copy }
           <MetricChart title="CPU" subtitle={metrics?.process?.cpuMode === "raw_multicore_tree" ? "Raw tree" : t.last60Seconds} samples={samples} valueKey="cpu" max={cpuMax} formatter={(value) => `${value.toFixed(1)}%`} />
           <MetricChart title={t.ramRss} subtitle={t.last60Seconds} samples={samples} valueKey="rss" max={rssMax} formatter={formatBytes} />
         </div>
+      </div>
+    </section>
+  );
+}
+
+function OperationsView({ server, api, token, t }: { server: Server; api: ApiFn; token: string; t: Copy }) {
+  const [tab, setTab] = useState<"backups" | "logs">("backups");
+  const [backups, setBackups] = useState<BackupEntry[]>([]);
+  const [logs, setLogs] = useState<LogFile[]>([]);
+  const [selectedLog, setSelectedLog] = useState("");
+  const [logContent, setLogContent] = useState("");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function loadBackups() {
+    const body = await api<{ backups: BackupEntry[] }>(`/servers/${server.id}/backups`);
+    setBackups(body.backups || []);
+  }
+
+  async function loadLogs() {
+    const body = await api<{ files: LogFile[] }>(`/servers/${server.id}/logs`);
+    setLogs(body.files || []);
+    if (!selectedLog && body.files?.[0]) {
+      await openLog(body.files[0].path);
+    }
+  }
+
+  async function openLog(path: string) {
+    setSelectedLog(path);
+    const body = await api<{ content: string }>(`/servers/${server.id}/logs?path=${encodeURIComponent(path)}`);
+    setLogContent(body.content || "");
+  }
+
+  useEffect(() => {
+    setMessage("");
+    setSelectedLog("");
+    setLogContent("");
+    loadBackups().catch((err) => setMessage(err.message));
+    loadLogs().catch(() => setLogs([]));
+  }, [server.id]);
+
+  async function createBackup() {
+    setBusy(true);
+    setMessage("");
+    try {
+      await api<BackupEntry>(`/servers/${server.id}/backups`, { method: "POST", body: "{}" });
+      await loadBackups();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Backup failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function restoreBackup(entry: BackupEntry) {
+    if (!confirm(`${t.restore} ${entry.name}?`)) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      await api(`/servers/${server.id}/backups/${entry.id}/restore`, { method: "POST", body: "{}" });
+      setMessage(`${entry.name} restored.`);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Restore failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteBackup(entry: BackupEntry) {
+    if (!confirm(`Delete ${entry.name}?`)) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      await api(`/servers/${server.id}/backups/${entry.id}`, { method: "DELETE" });
+      await loadBackups();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Delete failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const locked = runtimeActive(server) || busy;
+
+  return (
+    <section className="ops-panel">
+      <div className="ops-head">
+        <div>
+          <span className="section-kicker">{t.operations}</span>
+          <strong>{server.name}</strong>
+          <p>{runtimeActive(server) ? t.backupLocked : t.backupHelp}</p>
+        </div>
+        <div className="ops-tabs">
+          <button type="button" className={tab === "backups" ? "active" : ""} onClick={() => setTab("backups")}>{t.backups}</button>
+          <button type="button" className={tab === "logs" ? "active" : ""} onClick={() => setTab("logs")}>{t.logs}</button>
+        </div>
+      </div>
+
+      {tab === "backups" && (
+        <div className="ops-section">
+          <button className="primary" type="button" onClick={createBackup} disabled={locked}>
+            <Archive size={15} /> {t.createBackup}
+          </button>
+          <div className="ops-list">
+            {backups.map((entry) => (
+              <div className="ops-row" key={entry.id}>
+                <div>
+                  <strong>{entry.name}</strong>
+                  <span>{new Date(entry.createdAt).toLocaleString()} - {formatBytes(entry.size)}</span>
+                </div>
+                <a className="icon-link" href={`${apiBase}/servers/${server.id}/backups/${entry.id}/download?token=${encodeURIComponent(token)}`} title="Download">
+                  <Download size={15} />
+                </a>
+                <button type="button" onClick={() => restoreBackup(entry)} disabled={locked}>{t.restore}</button>
+                <button className="icon-danger" type="button" onClick={() => deleteBackup(entry)} disabled={busy} title="Delete"><Trash2 size={15} /></button>
+              </div>
+            ))}
+            {backups.length === 0 && <p className="panel-empty">{t.emptyFolder}</p>}
+          </div>
+        </div>
+      )}
+
+      {tab === "logs" && (
+        <div className="logs-layout">
+          <div className="logs-list">
+            <strong>{t.latestLogs}</strong>
+            {logs.map((file) => (
+              <button key={file.path} className={selectedLog === file.path ? "active" : ""} type="button" onClick={() => openLog(file.path)}>
+                <FileText size={15} /> <span>{file.path}</span>
+              </button>
+            ))}
+            {logs.length === 0 && <p className="panel-empty">{t.chooseLog}</p>}
+          </div>
+          <textarea className="log-viewer" value={logContent} readOnly placeholder={t.chooseLog} />
+        </div>
+      )}
+
+      {message && <p className="startup-message">{message}</p>}
+    </section>
+  );
+}
+
+function AuditView({ api, t }: { api: ApiFn; t: Copy }) {
+  const [entries, setEntries] = useState<AuditEntry[]>([]);
+  const [filter, setFilter] = useState("");
+  const [message, setMessage] = useState("");
+
+  async function load() {
+    const query = filter ? `&action=${encodeURIComponent(filter)}` : "";
+    const body = await api<{ entries: AuditEntry[] }>(`/audit?limit=150${query}`);
+    setEntries(body.entries || []);
+  }
+
+  useEffect(() => {
+    load().catch((err) => setMessage(err.message));
+  }, []);
+
+  return (
+    <section className="audit-panel">
+      <div className="audit-head">
+        <div>
+          <span className="section-kicker">{t.audit}</span>
+          <strong>{t.auditTrail}</strong>
+        </div>
+        <div className="audit-actions">
+          <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder={t.action} />
+          <button type="button" onClick={() => load().catch((err) => setMessage(err.message))}><RefreshCcw size={15} /> {t.refresh}</button>
+        </div>
+      </div>
+      <div className="audit-table">
+        <div className="audit-table-head">
+          <span>{t.time}</span>
+          <span>{t.actor}</span>
+          <span>{t.action}</span>
+          <span>{t.target}</span>
+        </div>
+        {entries.map((entry) => (
+          <div className="audit-row" key={entry.id}>
+            <span>{new Date(entry.time).toLocaleString()}</span>
+            <span><b className={`role-badge ${entry.actorRole}`}>{entry.actorRole}</b> {entry.actorUsername}</span>
+            <span>{entry.action}</span>
+            <span>{entry.targetName || entry.targetId || entry.targetType}</span>
+          </div>
+        ))}
+        {entries.length === 0 && <p className="panel-empty">{message || t.noAudit}</p>}
       </div>
     </section>
   );
