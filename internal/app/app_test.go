@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +14,30 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+func testApp(t *testing.T) *App {
+	t.Helper()
+	base := t.TempDir()
+	a := &App{
+		baseDir:   base,
+		dataDir:   filepath.Join(base, "data"),
+		config:    NewJSONStore(filepath.Join(base, "data", "config.json"), Config{JWTSecret: "test-secret"}),
+		users:     NewJSONStore(filepath.Join(base, "data", "users.json"), []User{}),
+		servers:   NewJSONStore(filepath.Join(base, "data", "servers.json"), []Server{}),
+		audit:     NewJSONStore(filepath.Join(base, "data", "audit.json"), []AuditEntry{}),
+		backups:   NewJSONStore(filepath.Join(base, "data", "backups.json"), []BackupEntry{}),
+		console:   NewConsoleHub(consoleMaxBytes),
+		processes: NewProcessManager(nil),
+	}
+	a.processes.app = a
+	if err := os.MkdirAll(filepath.Join(base, "server"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.config.Set(Config{JWTSecret: "test-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
 
 func TestSafePathRejectsTraversalAndAbsolutePaths(t *testing.T) {
 	base := t.TempDir()
@@ -137,12 +163,209 @@ func TestConsoleHubTrimsByByteLimit(t *testing.T) {
 	}
 }
 
+func TestRuntimeLifecycleMarkers(t *testing.T) {
+	if !detectMinecraftReady(`[11:52:01 INFO]: Done (12.345s)! For help, type "help"`) {
+		t.Fatal("expected Done line to mark server ready")
+	}
+	if detectMinecraftReady(`[11:52:01 INFO]: Done saving chunks`) {
+		t.Fatal("unexpected ready detection for unrelated Done line")
+	}
+	if !detectMinecraftStopping(`[11:52:32 INFO]: [MoonriseCommon] Awaiting termination of worker pool for up to 60s...`) {
+		t.Fatal("expected Moonrise shutdown line to mark stopping")
+	}
+
+	rt := NewRuntime(&exec.Cmd{}, nil)
+	if rt.State() != runtimeStarting {
+		t.Fatalf("expected new runtime to start as starting, got %q", rt.State())
+	}
+	if !rt.MarkRunning() {
+		t.Fatal("expected starting runtime to transition to running")
+	}
+	if rt.State() != runtimeRunning {
+		t.Fatalf("expected running state, got %q", rt.State())
+	}
+	if rt.MarkRunning() {
+		t.Fatal("expected duplicate running marker to be ignored")
+	}
+	rt.MarkStopping()
+	if rt.State() != runtimeStopping {
+		t.Fatalf("expected stopping state, got %q", rt.State())
+	}
+	if rt.MarkRunning() {
+		t.Fatal("expected running marker to be ignored after stopping")
+	}
+	rt.SetState(runtimeStopped)
+	if rt.State() != runtimeStopped {
+		t.Fatalf("expected stopped state, got %q", rt.State())
+	}
+}
+
 func TestSameVersionIgnoresLeadingV(t *testing.T) {
 	if !sameVersion("v1.2.3", "1.2.3") {
 		t.Fatal("expected versions with leading v to match")
 	}
 	if sameVersion("v1.2.4", "1.2.3") {
 		t.Fatal("expected different versions not to match")
+	}
+}
+
+func TestHardcodedAdminLoginWithoutStoredUsers(t *testing.T) {
+	a := testApp(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"admin","password":"endmin123"}`))
+	rr := httptest.NewRecorder()
+
+	a.handleLogin(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected hardcoded admin login, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		User User `json:"user"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.User.Username != "admin" || body.User.Role != "admin" {
+		t.Fatalf("unexpected login user: %#v", body.User)
+	}
+}
+
+func TestHardcodedAdminRejectsWrongPassword(t *testing.T) {
+	a := testApp(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"admin","password":"wrongpass"}`))
+	rr := httptest.NewRecorder()
+
+	a.handleLogin(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected wrong hardcoded admin password to be rejected, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestSetupCreatesUserRole(t *testing.T) {
+	a := testApp(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/setup", strings.NewReader(`{"username":"player","password":"password123"}`))
+	rr := httptest.NewRecorder()
+
+	a.handleSetup(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected setup success, got %d: %s", rr.Code, rr.Body.String())
+	}
+	users, err := a.users.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 || users[0].Role != "user" {
+		t.Fatalf("expected setup user role, got %#v", users)
+	}
+}
+
+func TestAuditListReturnsLatestFirst(t *testing.T) {
+	a := testApp(t)
+	user := User{ID: "usr_test", Username: "player", Role: "user"}
+	a.addAudit(httptest.NewRequest(http.MethodPost, "/one", nil), user, "first", "server", "srv", "Survival", http.StatusOK, nil)
+	a.addAudit(httptest.NewRequest(http.MethodPost, "/two", nil), hardcodedAdmin(), "second", "server", "srv", "Survival", http.StatusOK, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/audit?limit=1", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxUser{}, user))
+	rr := httptest.NewRecorder()
+
+	a.handleAudit(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected audit list, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Entries []AuditEntry `json:"entries"`
+		Total   int          `json:"total"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Total != 2 || len(body.Entries) != 1 || body.Entries[0].Action != "second" {
+		t.Fatalf("unexpected audit response: %#v", body)
+	}
+}
+
+func TestUserCannotAccessAdminEndpoint(t *testing.T) {
+	a := testApp(t)
+	user := User{ID: "usr_user", Username: "player", Role: "user", CreatedAt: time.Now()}
+	if err := a.users.Set([]User{user}); err != nil {
+		t.Fatal(err)
+	}
+	jwt, err := a.issueJWT(user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userReq := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
+	userReq.Header.Set("Authorization", "Bearer "+jwt)
+	userRR := httptest.NewRecorder()
+
+	a.auth(a.handleUsers, "admin")(userRR, userReq)
+
+	if userRR.Code != http.StatusForbidden {
+		t.Fatalf("expected user admin endpoint access to be forbidden, got %d: %s", userRR.Code, userRR.Body.String())
+	}
+}
+
+func TestStoredAdminRoleIsDowngradedToUser(t *testing.T) {
+	a := testApp(t)
+	legacy := User{ID: "usr_legacy", Username: "legacy", PasswordHash: hardcodedAdminPasswordHash, Role: "admin", CreatedAt: time.Now()}
+	if err := a.users.Set([]User{legacy}); err != nil {
+		t.Fatal(err)
+	}
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"legacy","password":"endmin123"}`))
+	loginRR := httptest.NewRecorder()
+	a.handleLogin(loginRR, loginReq)
+	if loginRR.Code != http.StatusOK {
+		t.Fatalf("expected legacy user login, got %d: %s", loginRR.Code, loginRR.Body.String())
+	}
+	var body struct {
+		Token string `json:"token"`
+		User  User   `json:"user"`
+	}
+	if err := json.NewDecoder(loginRR.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.User.Role != "user" {
+		t.Fatalf("expected stored admin role to be downgraded to user, got %#v", body.User)
+	}
+	adminReq := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
+	adminReq.Header.Set("Authorization", "Bearer "+body.Token)
+	adminRR := httptest.NewRecorder()
+	a.auth(a.handleUsers, "admin")(adminRR, adminReq)
+	if adminRR.Code != http.StatusForbidden {
+		t.Fatalf("expected downgraded stored admin to be forbidden, got %d: %s", adminRR.Code, adminRR.Body.String())
+	}
+}
+
+func TestTokenRouteRemoved(t *testing.T) {
+	a := testApp(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tokens", nil)
+	rr := httptest.NewRecorder()
+
+	a.routes().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected API token route to be removed, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestBackupCreateRejectsRunningServer(t *testing.T) {
+	a := testApp(t)
+	server := Server{ID: "srv_test", Name: "Survival", Slug: "survival", Root: "server/survival"}
+	if err := os.MkdirAll(filepath.Join(a.baseDir, "server", "survival"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	a.processes.runtimes[server.ID] = &Runtime{}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/srv_test/backups", strings.NewReader(`{}`))
+	req = req.WithContext(context.WithValue(req.Context(), ctxUser{}, User{Role: "user"}))
+	rr := httptest.NewRecorder()
+
+	a.handleBackups(rr, req, server, nil)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected backup conflict while running, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 

